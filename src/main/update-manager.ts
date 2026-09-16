@@ -98,7 +98,7 @@ export type UpdateStatus =
 
 // Repo the Velopack feed (win/mac) and the Linux nightly release both live
 // in. Matches the existing electron-builder release pipeline.
-const FEED_URL = 'https://github.com/got-feedback/feedback-desktop';
+const FEED_URL = 'https://github.com/get-flashbacks/feedBack-desktop';
 
 // GitHub REST API URL for the rolling nightly release. Public repo, no auth
 // needed. Only used on Linux.
