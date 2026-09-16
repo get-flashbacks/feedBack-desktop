@@ -136,7 +136,7 @@ clone_slopsmith() {
 		# get-flashbacks forks were all created under the feedBack-plugin-*
 		# casing (capital B), so the lowercase prefix strip doesn't apply
 		# to them; each needs an explicit dirname matching the plugin id.
-		get-flashbacks/feedback-plugin-bongocat
+		get-flashbacks/feedback-plugin-bongocat:feedback-plugin-bongocat
 		got-feedback/feedback-plugin-drums
 		get-flashbacks/feedBack-plugin-editor:editor
 		got-feedback/feedback-plugin-flappy-bend
@@ -147,14 +147,14 @@ clone_slopsmith() {
 		got-feedback/feedback-plugin-loosefolder:loose_folder
 		get-flashbacks/feedBack-plugin-lyrics-karaoke:lyrics_karaoke
 		get-flashbacks/feedBack-plugin-metronome:metronome
-		get-flashbacks/feedBack-plugin-midi:midi
+		get-flashbacks/feedBack-plugin-midi:midi_amp
 		got-feedback/feedback-plugin-multiplayer
 		get-flashbacks/feedBack-plugin-musicxml-import:musicxml_import
 		get-flashbacks/feedBack-plugin-nam-tone:nam_tone
-		get-flashbacks/feedBack-plugin-notedetect:notedetect
+		get-flashbacks/feedBack-plugin-notedetect:note_detect
 		get-flashbacks/feedBack-plugin-piano:piano
-		get-flashbacks/feedBack-plugin-practice:practice
-		get-flashbacks/feedBack-plugin-sectionmap:sectionmap
+		get-flashbacks/feedBack-plugin-practice:practice_journal
+		get-flashbacks/feedBack-plugin-sectionmap:section_map
 		get-flashbacks/feedBack-plugin-song-preview:song_preview
 		get-flashbacks/feedBack-plugin-splitscreen:splitscreen
 		get-flashbacks/feedBack-plugin-staffview:staffview
@@ -164,7 +164,7 @@ clone_slopsmith() {
 		# matching the plugin id, same as rig_builder below.
 		get-flashbacks/feedBack-plugin-stem-splitter:stem_splitter
 		get-flashbacks/feedBack-plugin-stems:stems
-		get-flashbacks/feedBack-plugin-stepmode:stepmode
+		get-flashbacks/feedBack-plugin-stepmode:step_mode
 		get-flashbacks/feedBack-plugin-strum-fighter:strum_fighter
 		got-feedback/feedback-plugin-studio
 		get-flashbacks/feedBack-plugin-tabview:tabview
