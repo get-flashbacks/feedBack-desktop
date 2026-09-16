@@ -94,7 +94,7 @@ docker run \
     -e GIT_TERMINAL_PROMPT=0 \
     -e "GH_CLONE_TOKEN=${GH_CLONE_TOKEN:-}" \
     -e "SLOPSMITH_REF=${SLOPSMITH_REF:-main}" \
-    -e "SLOPSMITH_REPO=${SLOPSMITH_REPO:-got-feedback/feedback}" \
+    -e "SLOPSMITH_REPO=${SLOPSMITH_REPO:-get-flashbacks/feedBack}" \
     -t \
     slopsmith-ubuntu-builder \
     bash -c './scripts/build-linux-ubuntu.sh'
