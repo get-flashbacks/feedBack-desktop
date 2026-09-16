@@ -111,7 +111,7 @@ clone_slopsmith() {
 	# mirroring SLOPSMITH_REF. Lets a contributor without push access to the
 	# core repo bundle a branch pushed to their own fork for a test build:
 	#   SLOPSMITH_REPO=me/feedBack SLOPSMITH_REF=my-branch
-	local slopsmith_repo="${SLOPSMITH_REPO:-got-feedback/feedback}"
+	local slopsmith_repo="${SLOPSMITH_REPO:-get-flashbacks/feedBack}"
 	local _auth=""
 	[[ -n "${GH_CLONE_TOKEN:-}" ]] && _auth="x-access-token:${GH_CLONE_TOKEN}@"
 	echo "Cloning Slopsmith repository (${slopsmith_repo} ref: ${slopsmith_ref})..."
@@ -131,49 +131,53 @@ clone_slopsmith() {
 	# plugin work in a feature-branch test build).
 	cd "$clone_dir/plugins"
 	local plugins=(
-		# Bundled plugins — all under the got-feedback org after the migration.
-		got-feedback/feedback-plugin-bongocat
+		# Bundled plugins — get-flashbacks forks where one exists, falling
+		# back to the got-feedback upstream where it doesn't. The
+		# get-flashbacks forks were all created under the feedBack-plugin-*
+		# casing (capital B), so the lowercase prefix strip doesn't apply
+		# to them; each needs an explicit dirname matching the plugin id.
+		get-flashbacks/feedback-plugin-bongocat
 		got-feedback/feedback-plugin-drums
-		got-feedback/feedback-plugin-editor
+		get-flashbacks/feedBack-plugin-editor:editor
 		got-feedback/feedback-plugin-flappy-bend
-		got-feedback/feedback-plugin-fretboard
-		got-feedback/feedback-plugin-guitar-theory
-		got-feedback/feedback-plugin-invert-highway
-		got-feedback/feedback-plugin-jumpingtab
+		get-flashbacks/feedBack-plugin-fretboard:fretboard
+		get-flashbacks/feedBack-plugin-guitar-theory:guitar_theory
+		get-flashbacks/feedBack-plugin-invert-highway:invert_highway
+		get-flashbacks/feedBack-plugin-jumpingtab:jumpingtab
 		got-feedback/feedback-plugin-loosefolder:loose_folder
-		got-feedback/feedback-plugin-lyrics-karaoke
-		got-feedback/feedback-plugin-metronome
-		got-feedback/feedback-plugin-midi
+		get-flashbacks/feedBack-plugin-lyrics-karaoke:lyrics_karaoke
+		get-flashbacks/feedBack-plugin-metronome:metronome
+		get-flashbacks/feedBack-plugin-midi:midi
 		got-feedback/feedback-plugin-multiplayer
-		got-feedback/feedback-plugin-musicxml-import
-		got-feedback/feedback-plugin-nam-tone
-		got-feedback/feedback-plugin-notedetect
-		got-feedback/feedback-plugin-piano
-		got-feedback/feedback-plugin-practice
-		got-feedback/feedback-plugin-sectionmap
-		got-feedback/feedback-plugin-song-preview
-		got-feedback/feedback-plugin-splitscreen
-		got-feedback/feedback-plugin-staffview
+		get-flashbacks/feedBack-plugin-musicxml-import:musicxml_import
+		get-flashbacks/feedBack-plugin-nam-tone:nam_tone
+		get-flashbacks/feedBack-plugin-notedetect:notedetect
+		get-flashbacks/feedBack-plugin-piano:piano
+		get-flashbacks/feedBack-plugin-practice:practice
+		get-flashbacks/feedBack-plugin-sectionmap:sectionmap
+		get-flashbacks/feedBack-plugin-song-preview:song_preview
+		get-flashbacks/feedBack-plugin-splitscreen:splitscreen
+		get-flashbacks/feedBack-plugin-staffview:staffview
 		got-feedback/feedback-plugin-stem-mixer
 		# Stem Splitter — repo uses the feedBack-plugin-* casing (capital B),
 		# so the lowercase prefix strip doesn't apply; explicit dirname
 		# matching the plugin id, same as rig_builder below.
-		got-feedback/feedBack-plugin-stem-splitter:stem_splitter
-		got-feedback/feedback-plugin-stems
-		got-feedback/feedback-plugin-stepmode
-		got-feedback/feedback-plugin-strum-fighter
+		get-flashbacks/feedBack-plugin-stem-splitter:stem_splitter
+		get-flashbacks/feedBack-plugin-stems:stems
+		get-flashbacks/feedBack-plugin-stepmode:stepmode
+		get-flashbacks/feedBack-plugin-strum-fighter:strum_fighter
 		got-feedback/feedback-plugin-studio
-		got-feedback/feedback-plugin-tabview
+		get-flashbacks/feedBack-plugin-tabview:tabview
 		got-feedback/feedback-plugin-themes
 		got-feedback/feedback-plugin-transpose-chords
-		got-feedback/feedback-plugin-tutorials
-		got-feedback/feedback-plugin-virtuoso
+		get-flashbacks/feedBack-plugin-tutorials:tutorials
+		get-flashbacks/feedBack-plugin-virtuoso:virtuoso
 		# Rig Builder (NAM tone builder) — the repo was renamed
 		# feedBack-plugin-rig-builder (capital B, so the lowercase prefix
 		# strip doesn't apply; explicit dirname instead). The old
 		# `got-feedback/rig_builder` name only worked via a GitHub rename
 		# redirect, which silently breaks if a new repo ever takes that name.
-		got-feedback/feedBack-plugin-rig-builder:rig_builder
+		get-flashbacks/feedBack-plugin-rig-builder:rig_builder
 		# Camera Director (3D-highway free camera) — our fork of nimuart's plugin
 		# (v3 popover launcher + drum/piano support; PR upstream at
 		# nimuart/cameradirector_feedback#3). Repo isn't under the
