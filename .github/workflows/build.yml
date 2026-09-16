@@ -593,7 +593,7 @@ jobs:
             echo "::error::FEEDBACK_CLONE_TOKEN secret is missing; cannot dispatch."
             exit 1
           fi
-          gh api -X POST repos/got-feedback/feedback/dispatches \
+          gh api -X POST repos/get-flashbacks/feedBack/dispatches \
             -f event_type=desktop-released \
             -f "client_payload[version]=$version"
           echo "Dispatched desktop-released event (version=$version) to slopsmith."

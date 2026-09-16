@@ -107,7 +107,7 @@ clone_slopsmith() {
 	# builds and the push/tag CI paths behave exactly as before.
 	# --branch accepts either a branch or a tag, both shallow-cloneable.
 	local slopsmith_ref="${SLOPSMITH_REF:-main}"
-	# SLOPSMITH_REPO overrides the core repo (default got-feedback/feedback),
+	# SLOPSMITH_REPO overrides the core repo (default get-flashbacks/feedBack),
 	# mirroring SLOPSMITH_REF. Lets a contributor without push access to the
 	# core repo bundle a branch pushed to their own fork for a test build:
 	#   SLOPSMITH_REPO=me/feedBack SLOPSMITH_REF=my-branch
