@@ -19,12 +19,21 @@ on:
   # coherent release build the desktop release/vX.Y.Z branch should be
   # built against the matching core branch — e.g. run this workflow on
   # release/v0.3.0 with slopsmith_ref=release/v0.3.0.
+  #
+  # The slopsmith_repo input selects which core *repo* to bundle. It
+  # defaults to get-flashbacks/feedBack; override it for a tester build
+  # against a contributor's own fork (e.g. slopsmith_repo=me/feedBack,
+  # paired with a slopsmith_ref pointing at their branch).
   workflow_dispatch:
     inputs:
       slopsmith_ref:
         description: "Slopsmith core ref (branch or tag) to bundle, e.g. release/v0.3.0. Defaults to main."
         required: false
         default: main
+      slopsmith_repo:
+        description: "Slopsmith core repo to bundle, e.g. me/feedBack for a test build against your own fork. Defaults to get-flashbacks/feedBack."
+        required: false
+        default: get-flashbacks/feedBack
 
 jobs:
   build:
@@ -149,6 +158,10 @@ jobs:
           # historical default-branch behaviour. clone_slopsmith() in
           # build-common.sh also defaults to main as a second safety net.
           SLOPSMITH_REF: ${{ inputs.slopsmith_ref || 'main' }}
+          # Which slopsmith core repo to clone + bundle. Same empty-on-
+          # push/tag caveat as SLOPSMITH_REF above — build-common.sh's own
+          # default (get-flashbacks/feedBack) is the second safety net.
+          SLOPSMITH_REPO: ${{ inputs.slopsmith_repo || 'get-flashbacks/feedBack' }}
           # PAT with read access to the private got-feedback repos so
           # build-common.sh can clone core + the bundled plugins.
           GH_CLONE_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
