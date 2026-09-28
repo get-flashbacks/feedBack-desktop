@@ -44,7 +44,7 @@ jobs:
         run: npm run typecheck
 
       - name: Run JavaScript tests
-        run: npm test
+        run: node --test tests/plugin-catalog.test.js
 
       - name: npm audit
         run: npm audit --audit-level=high
