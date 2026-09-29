@@ -46,6 +46,12 @@ jobs:
       - name: Run JavaScript tests
         run: node --test tests/plugin-catalog.test.js
 
+      - name: Check plugin catalog lock
+        run: npm run catalog:lock:check
+
+      - name: Verify pinned plugin manifests and archives
+        run: npm run catalog:verify-remote
+
       - name: npm audit
         run: npm audit --audit-level=high
         continue-on-error: true
