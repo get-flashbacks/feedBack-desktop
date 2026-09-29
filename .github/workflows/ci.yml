@@ -43,6 +43,9 @@ jobs:
       - name: TypeScript type check
         run: npm run typecheck
 
+      - name: Run JavaScript tests
+        run: node --test tests/plugin-catalog.test.js
+
       - name: npm audit
         run: npm audit --audit-level=high
         continue-on-error: true
