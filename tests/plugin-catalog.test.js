@@ -47,3 +47,11 @@ test('catalog validation enforces nested schema fields and rejects dependency cy
   assert(errors.some(error => error.includes('cannot default-select a hidden plugin')));
   assert(errors.some(error => error.includes('dependency cycle')));
 });
+
+test('catalog validation accepts prerelease versions and rejects malformed ones', () => {
+  const entry = validEntry('example');
+  entry.version = '1.2.3-beta.1';
+  assert.deepStrictEqual(validateCatalog({ schemaVersion: 1, entries: [entry] }), []);
+  entry.version = '1.2.3-';
+  assert(validateCatalog({ schemaVersion: 1, entries: [entry] }).some(error => error.includes('version must be semver-like')));
+});

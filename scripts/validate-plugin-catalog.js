@@ -23,7 +23,11 @@ const INSTALL_DIR_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const REPOSITORY_PATTERN = /^https:\/\/github\.com\/[^/]+\/[^/]+$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const ARCHIVE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/;
+// The prerelease suffix is a top-level alternative rather than an optional group:
+// nesting a `+` inside a `?` is the shape static analysis reports as a potential
+// catastrophic-backtracking sink. Both branches are linear and accept the same
+// versions as the pattern in resources/plugin-catalog.schema.json.
+const VERSION_PATTERN = /^(?:[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+)$/;
 const SOURCES = new Set(['get-flashbacks', 'upstream-official', 'reviewed-community']);
 const STABILITIES = new Set(['stable', 'beta', 'experimental']);
 const TIERS = new Set(['essential', 'recommended', 'optional', 'hidden']);
@@ -85,13 +89,17 @@ function validateCatalog(catalog) {
     fail(`${label}.compatibility must be an object`);
   } else {
     for (const key of unknownKeys(entry.compatibility, COMPATIBILITY_KEYS)) fail(`${label}.compatibility.${key} is not allowed`);
-    for (const key of ['minCoreVersion', 'minPluginApiVersion']) {
-      if (typeof entry.compatibility[key] !== 'string' || !entry.compatibility[key]) fail(`${label}.compatibility.${key} is required`);
+    // Destructure the four known fields instead of indexing them with a loop variable.
+    // The keys are a fixed literal list, but dynamic access reads as an object injection
+    // sink to static analysis and hides which field each message refers to.
+    const { minCoreVersion, minPluginApiVersion, maxCoreVersion, maxPluginApiVersion } = entry.compatibility;
+    if (typeof minCoreVersion !== 'string' || !minCoreVersion) fail(`${label}.compatibility.minCoreVersion is required`);
+    if (typeof minPluginApiVersion !== 'string' || !minPluginApiVersion) fail(`${label}.compatibility.minPluginApiVersion is required`);
+    if (maxCoreVersion !== undefined && (typeof maxCoreVersion !== 'string' || !maxCoreVersion)) {
+      fail(`${label}.compatibility.maxCoreVersion must be non-empty when present`);
     }
-    for (const key of ['maxCoreVersion', 'maxPluginApiVersion']) {
-      if (entry.compatibility[key] !== undefined && (typeof entry.compatibility[key] !== 'string' || !entry.compatibility[key])) {
-        fail(`${label}.compatibility.${key} must be non-empty when present`);
-      }
+    if (maxPluginApiVersion !== undefined && (typeof maxPluginApiVersion !== 'string' || !maxPluginApiVersion)) {
+      fail(`${label}.compatibility.maxPluginApiVersion must be non-empty when present`);
     }
   }
 
@@ -99,9 +107,9 @@ function validateCatalog(catalog) {
     fail(`${label}.size must be an object`);
   } else {
     for (const key of unknownKeys(entry.size, SIZE_KEYS)) fail(`${label}.size.${key} is not allowed`);
-    for (const key of ['downloadBytes', 'installedBytes']) {
-      if (!Number.isInteger(entry.size[key]) || entry.size[key] < 0) fail(`${label}.size.${key} must be a nonnegative integer`);
-    }
+    const { downloadBytes, installedBytes } = entry.size;
+    if (!Number.isInteger(downloadBytes) || downloadBytes < 0) fail(`${label}.size.downloadBytes must be a nonnegative integer`);
+    if (!Number.isInteger(installedBytes) || installedBytes < 0) fail(`${label}.size.installedBytes must be a nonnegative integer`);
   }
 
   if (!isObject(entry.selection)) {

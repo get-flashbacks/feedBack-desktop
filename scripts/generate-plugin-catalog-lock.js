@@ -5,13 +5,18 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
+// Every path in this script is built from __dirname plus a fixed file name, so
+// none of them can be influenced by the catalog or by command-line input. The
+// eslint-disable comments below record that per call site.
 const root = path.join(__dirname, '..');
 const catalogPath = path.join(root, 'resources', 'plugin-catalog.json');
 const lockPath = path.join(root, 'resources', 'plugin-catalog.lock.json');
 const packagePath = path.join(root, 'package.json');
 const checkOnly = process.argv.includes('--check');
+// eslint-disable-next-line security/detect-non-literal-fs-filename -- see above
 const catalogBytes = fs.readFileSync(catalogPath);
 const catalog = JSON.parse(catalogBytes.toString('utf8'));
+// eslint-disable-next-line security/detect-non-literal-fs-filename -- see above
 const desktop = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
 
 const lock = {
@@ -29,6 +34,7 @@ const lock = {
 const rendered = `${JSON.stringify(lock, null, 2)}\n`;
 
 if (checkOnly) {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- see above
   const current = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
   if (current !== rendered) {
     console.error('resources/plugin-catalog.lock.json is stale; run npm run catalog:lock');
@@ -37,6 +43,7 @@ if (checkOnly) {
     console.log(`Plugin catalog lock is current (${lock.plugins.length} plugins).`);
   }
 } else {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- see above
   fs.writeFileSync(lockPath, rendered);
   console.log(`Wrote ${lockPath} (${lock.plugins.length} plugins).`);
 }

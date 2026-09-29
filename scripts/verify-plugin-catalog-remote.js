@@ -9,7 +9,10 @@ const fs = require('fs');
 const path = require('path');
 const { validateCatalog } = require('./validate-plugin-catalog');
 
+// As in the validator, the catalog path is __dirname plus a fixed file name, never
+// catalog- or caller-controlled input.
 const catalogPath = path.join(__dirname, '..', 'resources', 'plugin-catalog.json');
+// eslint-disable-next-line security/detect-non-literal-fs-filename -- see above
 const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
 const localErrors = validateCatalog(catalog);
 if (localErrors.length) {
