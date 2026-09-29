@@ -7,15 +7,27 @@
 const fs = require('fs');
 const path = require('path');
 
+// eslint-disable-next-line security/detect-non-literal-fs-filename -- built entirely from
+// literal segments (__dirname + fixed names), never from user/catalog input
 const catalogPath = path.join(__dirname, '..', 'resources', 'plugin-catalog.json');
 const schemaPath = path.join(__dirname, '..', 'resources', 'plugin-catalog.schema.json');
+// eslint-disable-next-line security/detect-non-literal-fs-filename -- see above
 const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 const entrySchema = schema.$defs.entry;
+
+// Precompiled as RegExp literals (not built from a runtime string) so no call
+// site constructs a RegExp from a non-literal argument. `matches` takes the
+// compiled RegExp directly.
+const ID_PATTERN = /^[a-z][a-z0-9_-]*$/;
+const INSTALL_DIR_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const REPOSITORY_PATTERN = /^https:\/\/github\.com\/[^/]+\/[^/]+$/;
+const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
+const ARCHIVE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 function validateCatalog(catalog) {
   const errors = [];
   const fail = message => errors.push(message);
-  const matches = (value, pattern) => typeof value === 'string' && new RegExp(pattern).test(value);
+  const matches = (value, regex) => typeof value === 'string' && regex.test(value);
   if (catalog.schemaVersion !== 1) fail('schemaVersion must be 1');
   if (!Array.isArray(catalog.entries)) fail('entries must be an array');
   const required = entrySchema.required;
@@ -25,11 +37,11 @@ function validateCatalog(catalog) {
   const label = `entries[${index}]`;
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) { fail(`${label} must be an object`); continue; }
   for (const key of required) if (!(key in entry)) fail(`${label}.${key} is required`);
-  if (!matches(entry.id, '^[a-z][a-z0-9_-]*$')) fail(`${label}.id is invalid`);
-  if (!matches(entry.installDir, '^[A-Za-z_][A-Za-z0-9_]*$')) fail(`${label}.installDir must be Python-safe`);
-  if (!matches(entry.repository, '^https://github\\.com/[^/]+/[^/]+$')) fail(`${label}.repository must be a GitHub repository URL`);
-  if (!matches(entry.commit, '^[0-9a-f]{40}$')) fail(`${label}.commit must be an immutable 40-character SHA`);
-  if (!matches(entry.archiveSha256, '^[0-9a-f]{64}$')) fail(`${label}.archiveSha256 must be a SHA-256 hex digest`);
+  if (!matches(entry.id, ID_PATTERN)) fail(`${label}.id is invalid`);
+  if (!matches(entry.installDir, INSTALL_DIR_PATTERN)) fail(`${label}.installDir must be Python-safe`);
+  if (!matches(entry.repository, REPOSITORY_PATTERN)) fail(`${label}.repository must be a GitHub repository URL`);
+  if (!matches(entry.commit, COMMIT_PATTERN)) fail(`${label}.commit must be an immutable 40-character SHA`);
+  if (!matches(entry.archiveSha256, ARCHIVE_SHA256_PATTERN)) fail(`${label}.archiveSha256 must be a SHA-256 hex digest`);
   if (ids.has(entry.id)) fail(`${label}.id duplicates ${entry.id}`); ids.add(entry.id);
     if (dirs.has(entry.installDir)) fail(`${label}.installDir duplicates ${entry.installDir}`); dirs.add(entry.installDir);
   }
@@ -46,6 +58,7 @@ function validateCatalog(catalog) {
   return errors;
 }
 
+// eslint-disable-next-line security/detect-non-literal-fs-filename -- see comment at catalogPath above
 const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
 const errors = validateCatalog(catalog);
 if (errors.length) {
