@@ -33,6 +33,7 @@
         "name",
         "description",
         "repository",
+        "version",
         "commit",
         "archiveSha256",
         "source",
@@ -65,6 +66,10 @@
         "repository": {
           "type": "string",
           "pattern": "^https://github\\.com/[^/]+/[^/]+$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
         },
         "commit": {
           "type": "string",
