@@ -155,6 +155,14 @@
             renderLanStatus(wanted, [], 'Restarting server to apply…');
             try {
                 const res = await network.setLanAccess(wanted);
+                if (res.success === false) {
+                    // The request was declined before anything changed, so the
+                    // old bind address is still live. res.enabled is the
+                    // authoritative state; show it and let the user retry.
+                    lanToggle.checked = !!res.enabled;
+                    renderLanStatus(!!res.enabled, res.urls || [], res.message);
+                    return;
+                }
                 renderLanStatus(res.enabled, res.urls);
             } catch (e) {
                 lanToggle.checked = !wanted; // revert on failure

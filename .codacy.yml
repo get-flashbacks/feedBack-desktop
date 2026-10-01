@@ -1,0 +1,8 @@
+---
+# The unit tests build throwaway paths under os.tmpdir() and load the TypeScript
+# sources dynamically, which trips Codacy's path-construction and non-literal
+# require rules. They run only in CI/dev and never handle untrusted input, so
+# they are excluded from analysis; production code under src/ and scripts/ is
+# still analyzed.
+exclude_paths:
+  - "tests/**"

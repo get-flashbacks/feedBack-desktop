@@ -940,10 +940,51 @@ export function stopPython(immediate = false): void {
     }, 5000);
 }
 
+// A restart is in flight (catalog install activation). Overlapping restarts
+// interleave through the module-global serverPort/serverReady/startupError
+// state, so a second one would kill the first's fresh child.
+let restartInFlight: Promise<number> | null = null;
+
+export function isRestarting(): boolean {
+    return restartInFlight !== null;
+}
+
+/**
+ * Fire-and-forget restart. Callers that report success to the user must
+ * decline first via isInstallBusy() (plugin-manager.ts), before persisting any
+ * setting. The in-flight check below is only a backstop so a caller that
+ * forgets cannot kill the catalog installer's fresh backend.
+ */
 export function restartPython(): void {
+    if (restartInFlight) {
+        console.warn('[python] restart requested while another restart is running; ignoring');
+        return;
+    }
     stopPython();
     // Wait a bit for port to be released, then restart
     setTimeout(() => startPython(), 1000);
 }
 
-export { getPluginsDir, getConfigDir, getDLCDir };
+// Awaitable restart used by the catalog installer: stop the backend, start it
+// again and resolve with the port once it is serving, so the caller can probe
+// /api/plugins to confirm freshly installed plugins actually activated.
+// Concurrent callers share the one in-flight restart.
+export function restartPythonAndWait(): Promise<number> {
+    if (restartInFlight) return restartInFlight;
+    restartInFlight = (async () => {
+        stopPython();
+        await new Promise((r) => setTimeout(r, 1000));
+        await startPython();
+        return await waitForPython();
+    })().finally(() => { restartInFlight = null; });
+    return restartInFlight;
+}
+
+// The packaged (read-only) core plugins directory. Plugins there that carry
+// `"bundled": true` always win over a user-installed copy with the same id,
+// so the catalog installer refuses to "install" over them.
+function getCorePluginsDir(): string {
+    return path.join(findSlopsmithDir(), 'plugins');
+}
+
+export { getPluginsDir, getConfigDir, getDLCDir, getCorePluginsDir };
