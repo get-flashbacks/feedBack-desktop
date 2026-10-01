@@ -125,9 +125,15 @@ bundled catalog and builds the one URL it will download:
   browser storage, not in the plugin's source directory, so a source update
   never touches them. Removing a plugin also drops its backup, so the backup
   can never be "restored" over a later fresh install.
-- **Dependencies.** A plugin is refused if a declared dependency is neither
-  installed nor in the same batch. It is also refused if a declared conflict
-  is installed or in the same batch.
+- **Dependencies.** Dependencies install before the plugins that declare them,
+  so ordering in the request does not matter. A dependency is satisfied only by
+  a copy that is already installed or that actually landed during this batch;
+  one that failed to install refuses its dependents too.
+- **Conflicts.** A plugin is refused if a declared conflict is already installed
+  or was installed earlier in the same batch. A conflict is fatal only for the
+  entry that would come second, so requesting a conflicting pair installs the
+  first and explains the second. Conflicts may be declared one-sidedly — `x`
+  conflicting with `y` is enough, and either order of the request obeys it.
 
 ### User copies vs. bundled plugins
 

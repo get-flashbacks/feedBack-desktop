@@ -526,7 +526,7 @@ const feedBackDesktopApi = {
     network: {
         getLanAccess: (): Promise<{ enabled: boolean; urls: string[] }> =>
             ipcRenderer.invoke('network:getLanAccess'),
-        setLanAccess: (enabled: boolean): Promise<{ success: boolean; enabled: boolean; urls: string[] }> =>
+        setLanAccess: (enabled: boolean): Promise<{ success: boolean; enabled: boolean; urls: string[]; message?: string }> =>
             ipcRenderer.invoke('network:setLanAccess', enabled),
     },
 

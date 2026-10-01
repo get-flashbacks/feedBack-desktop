@@ -1328,7 +1328,11 @@ async function startup(): Promise<void> {
         // Re-spawn uvicorn with the new --host. Same port is reused (the old
         // process releases it first), so the already-loaded 127.0.0.1
         // renderer keeps working once the backend is back up.
-        restartPython();
+        if (!restartPython()) {
+            // Another restart owns the backend right now; the setting is
+            // persisted but the new bind address needs a restart we declined.
+            return { success: false, enabled: on, urls: getLanUrls(), message: 'A plugin installation is restarting the server. Try again in a moment.' };
+        }
         // Wait for the backend to actually rebind before resolving, so the UI
         // doesn't hand out a LAN URL that 404s during the ~restart window. If
         // it doesn't come back in time we still report the intended state —

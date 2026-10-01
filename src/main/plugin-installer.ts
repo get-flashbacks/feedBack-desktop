@@ -479,6 +479,9 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
         // downloading.
         const hadPrevious = inspectDestination(dest, entry);
         const backup = backupPathFor(pluginsDir, entry.installDir);
+        // Both branches below write through the backup root (rmSync follows
+        // symlinks), so it is validated once, before either of them runs.
+        ensureRealDirectory(path.dirname(backup), entry.name);
         let displaced: string | null = null;
         if (!hadPrevious) {
             // A backup without a live copy belongs to a plugin the user has
@@ -491,7 +494,6 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
                 // unconfirmed copy currently in place.
                 displaced = path.join(work, 'unconfirmed');
             } else {
-                ensureRealDirectory(path.dirname(backup), entry.name);
                 displaced = backup;
             }
             try {
@@ -646,10 +648,13 @@ export async function installCatalogBatch(ids: string[], catalog: Catalog, opts:
         }
         // A conflict is fatal only for the entry that would come second, so
         // selecting a conflicting pair installs one and explains the other
-        // instead of rejecting both. Conflicts may be declared one-sidedly.
+        // instead of rejecting both. Conflicts may be declared one-sidedly, so
+        // both arms read the same set — already on disk plus installed by this
+        // batch — rather than assuming the declaration is symmetric.
+        const live = new Set([...opts.installedIds, ...installedNow]);
         const conflicting = [
-            ...entry.conflicts.filter(c => installedNow.has(c) || opts.installedIds.has(c)),
-            ...[...installedNow].filter(other => catalog.byId.get(other)?.conflicts.includes(entry.id)),
+            ...entry.conflicts.filter(c => live.has(c)),
+            ...[...live].filter(other => catalog.byId.get(other)?.conflicts.includes(entry.id)),
         ];
         if (conflicting.length) {
             const names = [...new Set(conflicting)].map(c => catalog.byId.get(c)?.name || c).join(', ');

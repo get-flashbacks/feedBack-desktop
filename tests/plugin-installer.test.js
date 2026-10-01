@@ -658,6 +658,34 @@ test('batch: a conflicting pair installs one and explains the other', async () =
     assert.strictEqual(reversed.find(r => r.id === 'one').success, false);
 });
 
+test('batch: a one-sided conflict is enforced against an already-installed plugin', async () => {
+    // `one` is on disk and declares the conflict; requesting `two` alone is the
+    // ordinary install flow and must still be refused.
+    const { pluginsDir, fetch, catalog } = pairSetup([
+        { id: 'one', conflicts: ['two'] },
+        { id: 'two' },
+    ]);
+    const results = await installer.installCatalogBatch(['two'], catalog, {
+        pluginsDir, fetch, installedIds: new Set(['one']),
+    });
+    assert.deepStrictEqual(results.map(r => [r.id, r.success]), [['two', false]]);
+    assert.match(results[0].message, /conflicts with ONE/);
+});
+
+test('a symlinked backup root is refused on a fresh install too', async () => {
+    if (process.platform === 'win32') return;
+    const zip = pluginZip();
+    const { pluginsDir, entry, fetch } = setup(zip);
+    const elsewhere = path.join(path.dirname(pluginsDir), 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    fs.writeFileSync(path.join(elsewhere, 'important.txt'), 'keep me');
+    fs.symlinkSync(elsewhere, path.join(pluginsDir, installer.BACKUP_DIR));
+    // No previous install: the `rmQuiet(backup)` branch must not resolve
+    // through the symlink and delete the squatting target.
+    await assert.rejects(installer.installCatalogEntry(entry, { pluginsDir, fetch }), /backup location/);
+    assert.deepStrictEqual(fs.readdirSync(elsewhere), ['important.txt']);
+});
+
 test('a symlinked backup root is refused instead of redirecting the previous version', async () => {
     if (process.platform === 'win32') return;
     const zip = pluginZip();

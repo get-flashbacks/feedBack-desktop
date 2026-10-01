@@ -268,7 +268,9 @@ export function initSoundfontManager(getMainWindow: () => BrowserWindow | null):
             return { success: false, message: 'High-quality soundfont not downloaded yet' };
         }
         setDesktopConfig({ soundfontQuality: quality });
-        restartPython();
+        if (!restartPython()) {
+            return { success: false, message: 'A plugin installation is restarting the audio engine. Try again in a moment.' };
+        }
         return { success: true, message: 'Restarting audio engine…' };
     });
 
