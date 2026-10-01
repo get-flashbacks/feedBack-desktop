@@ -226,7 +226,6 @@ function getCatalog(): Catalog {
 function readManifest(dir: string): Record<string, any> | null {
     try {
         // dir is a scanned plugin directory; the file name is a literal
-        // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
         const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'plugin.json'), 'utf-8'));
         return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
     } catch {
@@ -251,7 +250,6 @@ function scanPluginDir(dir: string): { ids: Set<string>; bundledIds: Set<string>
     for (const entry of entries) {
         if (entry.name.startsWith('.')) continue;
         // entry.name comes from readdirSync of the app's own plugins directory
-        // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
         const manifest = readManifest(path.join(dir, entry.name));
         if (!manifest || typeof manifest.id !== 'string') continue;
         ids.add(manifest.id);
