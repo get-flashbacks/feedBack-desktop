@@ -373,7 +373,15 @@ export function cleanupStaging(pluginsDir: string): void {
     rmQuiet(path.join(pluginsDir, STAGING_DIR));
 }
 
+/**
+ * Backup slot for an install directory. `installDir` must match the catalog's
+ * install-dir pattern (a single Python-safe segment); anything else throws, so
+ * no caller can build a path outside the backup root by skipping validation.
+ */
 export function backupPathFor(pluginsDir: string, installDir: string): string {
+    if (typeof installDir !== 'string' || !INSTALL_DIR_PATTERN.test(installDir)) {
+        throw new InstallError('Invalid plugin.');
+    }
     return path.join(pluginsDir, BACKUP_DIR, installDir);
 }
 

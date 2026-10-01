@@ -518,3 +518,12 @@ test('batch: no activation or restart happens when nothing was installed', async
     });
     assert.strictEqual(activations, 0);
 });
+
+test('backup paths only accept single catalog-style directory names', () => {
+    const root = path.join(os.tmpdir(), 'plugins');
+    assert.strictEqual(installer.backupPathFor(root, 'example'), path.join(root, installer.BACKUP_DIR, 'example'));
+    for (const bad of ['..', '../x', 'a/b', 'a\\b', '', '.hidden', 'has-dash', 'x'.concat('\0'), 42, null]) {
+        assert.throws(() => installer.backupPathFor(root, bad), installer.InstallError, String(bad));
+        assert.throws(() => installer.hasBackup(root, bad), installer.InstallError, String(bad));
+    }
+});
