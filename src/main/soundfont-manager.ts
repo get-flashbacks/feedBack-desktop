@@ -12,7 +12,7 @@ import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { restartPython } from './python';
+import { isRestarting, restartPython } from './python';
 import type { SavedWindowBounds } from './window-bounds';
 
 // ── Source of truth for the high-quality soundfont ──────────────────────────
@@ -266,6 +266,11 @@ export function initSoundfontManager(getMainWindow: () => BrowserWindow | null):
         }
         if (quality === 'high' && !fs.existsSync(highQualityPath())) {
             return { success: false, message: 'High-quality soundfont not downloaded yet' };
+        }
+        // Decline before persisting so the stored quality never differs from
+        // what the running audio engine was started with.
+        if (isRestarting()) {
+            return { success: false, message: 'A plugin installation is restarting the audio engine. Try again in a moment.' };
         }
         setDesktopConfig({ soundfontQuality: quality });
         if (!restartPython()) {

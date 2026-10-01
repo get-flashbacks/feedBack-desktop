@@ -105,7 +105,7 @@ crashReporter.start({
     uploadToServer: false,
     compress: false,
 });
-import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, getLanUrls, getConfigDir } from './python';
+import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, isRestarting, getLanUrls, getConfigDir } from './python';
 import { runConfigMigrations } from './config-migrations';
 import { registerMaintenanceHandlers } from './config-reset';
 import {
@@ -1324,6 +1324,11 @@ async function startup(): Promise<void> {
     }));
     ipcMain.handle('network:setLanAccess', async (_event, enabled: unknown) => {
         const on = enabled === true;
+        // Decline before persisting: saving a bind address the backend never
+        // adopts would leave the stored setting and the live server disagreeing.
+        if (isRestarting()) {
+            return { success: false, enabled: !!getDesktopConfig().lanAccess, urls: getLanUrls(), message: 'A plugin installation is restarting the server. Try again in a moment.' };
+        }
         setDesktopConfig({ lanAccess: on });
         // Re-spawn uvicorn with the new --host. Same port is reused (the old
         // process releases it first), so the already-loaded 127.0.0.1
