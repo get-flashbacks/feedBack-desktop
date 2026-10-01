@@ -203,16 +203,17 @@ export function parseArchive(buf: Buffer, limits: ArchiveLimits = DEFAULT_ARCHIV
         validateEntryPath(name, limits.maxPathLength);
         const isDirectory = name.endsWith('/');
 
-        // Unix hosts encode the file type in the high 16 bits. Symlinks (and
-        // device/fifo/socket entries) are rejected outright: a plugin never
-        // needs one, and a link is the classic way to make a later write land
-        // outside the extraction root.
+        // The file type lives in the high 16 bits of the external attributes.
+        // `madeBy` is attacker-controlled, so symlinks and special files are
+        // rejected whenever the type bits are set, whatever host is declared:
+        // a plugin never needs one, and a link is the classic way to make a
+        // later write land outside the extraction root.
         const mode = (externalAttrs >>> 16) & 0xffff;
         const fileType = mode & S_IFMT;
-        if ((madeBy >>> 8) === HOST_UNIX && fileType !== 0) {
-            if (fileType === S_IFLNK) throw new ArchiveError('archive contains a symbolic link');
-            if (fileType !== S_IFREG && fileType !== S_IFDIR) throw new ArchiveError('archive contains a special file');
-            if ((fileType === S_IFDIR) !== isDirectory) throw new ArchiveError('archive entry type is inconsistent');
+        if (fileType === S_IFLNK) throw new ArchiveError('archive contains a symbolic link');
+        if (fileType !== 0 && fileType !== S_IFREG && fileType !== S_IFDIR) throw new ArchiveError('archive contains a special file');
+        if ((madeBy >>> 8) === HOST_UNIX && fileType !== 0 && (fileType === S_IFDIR) !== isDirectory) {
+            throw new ArchiveError('archive entry type is inconsistent');
         }
         if (isDirectory && (uncompressedSize !== 0 || compressedSize !== 0)) {
             throw new ArchiveError('archive directory entry carries data');

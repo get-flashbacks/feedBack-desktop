@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import {
     getCorePluginsDir,
     getPluginsDir,
+    isRestarting,
     restartPython,
     restartPythonAndWait,
 } from './python';
@@ -334,7 +335,11 @@ async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string
         const byId = new Map(rows.filter(r => r && typeof r.id === 'string').map(r => [r.id, r]));
         let pending = false;
         for (const outcome of outcomes) {
+            // A conclusive result is final: a later poll (backend reload,
+            // re-enumeration) must not turn a confirmed plugin into a failure.
+            if (statuses.has(outcome.id)) continue;
             const row = byId.get(outcome.id);
+            if (row) missingSince.delete(outcome.id);
             if (row?.status === 'installing') { pending = true; continue; }
             if (!row) {
                 const since = missingSince.get(outcome.id) ?? Date.now();
@@ -352,16 +357,19 @@ async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string
         }
         if (!pending) return statuses;
         if (Date.now() > deadline) return unconfirmed(statuses, outcomes);
-        statuses.clear();
         await new Promise(r => setTimeout(r, 2000));
     }
 }
 
 let catalogBusy = false;
+const MAX_CATALOG_SELECTION = 200;
 
 async function installFromCatalog(ids: unknown): Promise<{ success: boolean; message: string; results: unknown[] }> {
-    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 200) {
+    if (!Array.isArray(ids) || ids.length === 0) {
         return { success: false, message: 'Select at least one plugin to install.', results: [] };
+    }
+    if (ids.length > MAX_CATALOG_SELECTION) {
+        return { success: false, message: `Select at most ${MAX_CATALOG_SELECTION} plugins at a time.`, results: [] };
     }
     if (catalogBusy) {
         return { success: false, message: 'Another plugin installation is already running.', results: [] };
@@ -395,6 +403,14 @@ async function installFromCatalog(ids: unknown): Promise<{ success: boolean; mes
 }
 
 function listCatalog(): unknown[] {
+    let catalog: Catalog;
+    try {
+        catalog = getCatalog();
+    } catch (e) {
+        // A missing or damaged catalog is "nothing to offer", not an IPC error.
+        console.error('[plugins] catalog unavailable', e);
+        return [];
+    }
     const pluginsDir = getPluginsDir();
     const installed = new Map<string, string>();
     for (const entry of fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir) : []) {
@@ -403,7 +419,7 @@ function listCatalog(): unknown[] {
         if (manifest && typeof manifest.id === 'string') installed.set(manifest.id, String(manifest.version ?? ''));
     }
     const bundled = scanPluginDir(getCorePluginsDir()).bundledIds;
-    return getCatalog().entries.map(entry => ({
+    return catalog.entries.map(entry => ({
         ...entry,
         installedVersion: installed.get(entry.id) ?? null,
         bundled: bundled.has(entry.id),
@@ -412,7 +428,13 @@ function listCatalog(): unknown[] {
 }
 
 async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; message: string }> {
-    const entry = typeof id === 'string' ? getCatalog().byId.get(id) : undefined;
+    let entry;
+    try {
+        entry = typeof id === 'string' ? getCatalog().byId.get(id) : undefined;
+    } catch (e) {
+        console.error('[plugins] catalog unavailable', e);
+        return { success: false, message: e instanceof InstallError ? e.message : 'The plugin catalog is unavailable.' };
+    }
     if (!entry) return { success: false, message: 'That plugin is not available in the catalog.' };
     if (catalogBusy) return { success: false, message: 'A plugin installation is running.' };
     if (!hasBackup(getPluginsDir(), entry.installDir)) {
@@ -461,6 +483,9 @@ export function initPluginManager(): void {
     });
 
     ipcMain.handle('plugins:restart', () => {
+        if (catalogBusy || isRestarting()) {
+            return { success: false, message: 'A plugin installation is restarting the server. Try again in a moment.' };
+        }
         restartPython();
         return { success: true, message: 'Restarting server...' };
     });

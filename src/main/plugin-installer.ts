@@ -319,6 +319,22 @@ function rmdirIfEmpty(dir: string): void {
     try { fs.rmdirSync(dir); } catch { /* not empty or already gone */ }
 }
 
+/**
+ * Create `dir` if missing and require it to be a real directory. A symlink
+ * (or file) squatting on an installer-owned directory would otherwise
+ * redirect renames outside the plugins root.
+ */
+function ensureRealDirectory(dir: string, label: string): void {
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        const stat = fs.lstatSync(dir);
+        if (stat.isDirectory() && !stat.isSymbolicLink()) return;
+    } catch (e) {
+        console.error('[plugin-installer] could not prepare installer directory', e);
+    }
+    throw new InstallError(`The backup location for ${label} is not usable. Remove the ${BACKUP_DIR} folder and retry.`);
+}
+
 function rmQuiet(target: string): void {
     try {
         fs.rmSync(target, { recursive: true, force: true });
@@ -475,7 +491,7 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
                 // unconfirmed copy currently in place.
                 displaced = path.join(work, 'unconfirmed');
             } else {
-                fs.mkdirSync(path.dirname(backup), { recursive: true });
+                ensureRealDirectory(path.dirname(backup), entry.name);
                 displaced = backup;
             }
             try {
@@ -594,9 +610,25 @@ export interface BatchOptions extends InstallerOptions {
  */
 export async function installCatalogBatch(ids: string[], catalog: Catalog, opts: BatchOptions): Promise<BatchItemResult[]> {
     const results: BatchItemResult[] = [];
-    const unique = [...new Set(Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [])];
-    const selected = new Set(unique);
+    const requested = [...new Set(Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [])];
+    const selected = new Set(requested);
     const outcomes: InstallOutcome[] = [];
+    // Plugins that actually landed on disk during this batch. Dependencies and
+    // conflicts are judged against this, not against what was merely requested,
+    // so a failed dependency is never papered over by its dependent installing.
+    const installedNow = new Set<string>();
+
+    // Install dependencies before their dependents (the catalog validator
+    // guarantees the graph is acyclic; `visited` also guards a damaged one).
+    const unique: string[] = [];
+    const visited = new Set<string>();
+    const visit = (id: string): void => {
+        if (visited.has(id)) return;
+        visited.add(id);
+        for (const dep of catalog.byId.get(id)?.dependencies ?? []) if (selected.has(dep)) visit(dep);
+        unique.push(id);
+    };
+    requested.forEach(visit);
 
     for (const id of unique) {
         const entry = catalog.byId.get(id);
@@ -604,20 +636,29 @@ export async function installCatalogBatch(ids: string[], catalog: Catalog, opts:
             results.push({ id, name: id, success: false, message: 'That plugin is not available in the catalog.' });
             continue;
         }
-        const missing = entry.dependencies.filter(dep => !selected.has(dep) && !opts.installedIds.has(dep));
+        const missing = entry.dependencies.filter(dep => !installedNow.has(dep) && !opts.installedIds.has(dep));
         if (missing.length) {
             const names = missing.map(dep => catalog.byId.get(dep)?.name || dep).join(', ');
-            results.push({ id, name: entry.name, success: false, message: `${entry.name} requires ${names}.` });
+            const failedHere = missing.some(dep => selected.has(dep));
+            const reason = failedHere ? `${entry.name} requires ${names}, which could not be installed.` : `${entry.name} requires ${names}.`;
+            results.push({ id, name: entry.name, success: false, message: reason });
             continue;
         }
-        const conflicting = entry.conflicts.filter(c => selected.has(c) || opts.installedIds.has(c));
+        // A conflict is fatal only for the entry that would come second, so
+        // selecting a conflicting pair installs one and explains the other
+        // instead of rejecting both. Conflicts may be declared one-sidedly.
+        const conflicting = [
+            ...entry.conflicts.filter(c => installedNow.has(c) || opts.installedIds.has(c)),
+            ...[...installedNow].filter(other => catalog.byId.get(other)?.conflicts.includes(entry.id)),
+        ];
         if (conflicting.length) {
-            const names = conflicting.map(c => catalog.byId.get(c)?.name || c).join(', ');
-            results.push({ id, name: entry.name, success: false, message: `${entry.name} conflicts with ${names}.` });
+            const names = [...new Set(conflicting)].map(c => catalog.byId.get(c)?.name || c).join(', ');
+            results.push({ id, name: entry.name, success: false, message: `${entry.name} conflicts with ${names}. Install only one of them.` });
             continue;
         }
         try {
             outcomes.push(await installCatalogEntry(entry, opts));
+            installedNow.add(entry.id);
             results.push({ id, name: entry.name, success: true, message: `Installed ${entry.name} ${entry.version}.` });
         } catch (e) {
             const message = e instanceof InstallError ? e.message : `${entry.name} could not be installed.`;

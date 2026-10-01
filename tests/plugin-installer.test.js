@@ -65,7 +65,7 @@ function makeZip(entries, comment = '') {
         locals.push(local, name, payload);
         const central = Buffer.alloc(46);
         central.writeUInt32LE(0x02014b50, 0);
-        central.writeUInt16LE(e.mode !== undefined ? (3 << 8) | 20 : 20, 4);
+        central.writeUInt16LE(((e.host ?? (e.mode !== undefined ? 3 : 0)) << 8) | 20, 4);
         central.writeUInt16LE(20, 6);
         central.writeUInt16LE(flags, 8);
         central.writeUInt16LE(method, 10);
@@ -197,7 +197,7 @@ test('archive paths: traversal, absolute, drive, backslash, and reserved names a
 test('names that merely start with dots are not treated as traversal', () => {
     // GitHub stores names as UTF-8 with the UTF-8 flag clear, so a non-ASCII
     // name has to decode as UTF-8 rather than be rejected as CP437.
-    const zip = pluginZip({ extra: [{ name: '..config/', data: undefined }, { name: '..dotfile.js', data: 'x' }, { name: 'ünïcode/日本語.js', data: 'y' }] });
+    const zip = pluginZip({ extra: [{ name: '..config/', data: undefined }, { name: '..dotfile.js', data: 'x' }, { name: 'ünïcode/日本語.js', data: 'y', flags: 0 }] });
     const parsed = archiveMod.parseArchive(zip);
     const dest = path.join(tmpDir(), 'out');
     archiveMod.extractArchive(zip, parsed, PREFIX, dest);
@@ -209,6 +209,14 @@ test('names that merely start with dots are not treated as traversal', () => {
 test('symbolic links and special files are rejected', () => {
     const link = makeZip([{ name: PREFIX }, { name: `${PREFIX}link`, data: '../../../etc', mode: 0o120777 }]);
     assert.throws(() => archiveMod.parseArchive(link), /symbolic link/);
+    // The made-by host byte is attacker-controlled: declaring FAT (0) or NTFS
+    // (10) must not skip the type check.
+    for (const host of [0, 10]) {
+        const spoofed = makeZip([{ name: PREFIX }, { name: `${PREFIX}link`, data: '../../../etc', mode: 0o120777, host }]);
+        assert.throws(() => archiveMod.parseArchive(spoofed), /symbolic link/, `host ${host}`);
+        const device = makeZip([{ name: PREFIX }, { name: `${PREFIX}dev`, data: '', mode: 0o020644, host }]);
+        assert.throws(() => archiveMod.parseArchive(device), /special file/, `host ${host}`);
+    }
     const fifo = makeZip([{ name: PREFIX }, { name: `${PREFIX}fifo`, data: '', mode: 0o010644 }]);
     assert.throws(() => archiveMod.parseArchive(fifo), /special file/);
 });
@@ -592,4 +600,81 @@ test('backup paths only accept single catalog-style directory names', () => {
         assert.throws(() => installer.backupPathFor(root, bad), installer.InstallError, String(bad));
         assert.throws(() => installer.hasBackup(root, bad), installer.InstallError, String(bad));
     }
+});
+
+function pairSetup(defs) {
+    const pluginsDir = path.join(tmpDir(), 'plugins');
+    fs.mkdirSync(pluginsDir);
+    const map = {};
+    const entries = defs.map(({ id, tamper, ...extra }) => {
+        const prefix = `feedBack-plugin-${id}-${COMMIT}/`;
+        const zip = pluginZip({ id, prefix });
+        const entry = entryFor(zip, {
+            id, installDir: id, name: id.toUpperCase(),
+            repository: `https://github.com/get-flashbacks/feedBack-plugin-${id}`, ...extra,
+        });
+        map[installer.archiveUrlFor(entry)] = { body: tamper ? Buffer.from(zip).fill(0, 40, 60) : zip };
+        return entry;
+    });
+    return { pluginsDir, fetch: fakeFetch(map), catalog: { entries, byId: new Map(entries.map(e => [e.id, e])) } };
+}
+
+test('batch: a dependent is not installed when its dependency failed, whatever the request order', async () => {
+    const { pluginsDir, fetch, catalog } = pairSetup([
+        { id: 'base', tamper: true },
+        { id: 'addon', dependencies: ['base'] },
+    ]);
+    const results = await installer.installCatalogBatch(['addon', 'base'], catalog, { pluginsDir, fetch, installedIds: new Set() });
+    const byId = Object.fromEntries(results.map(r => [r.id, r]));
+    assert.strictEqual(byId.base.success, false);
+    assert.strictEqual(byId.addon.success, false);
+    assert.match(byId.addon.message, /requires BASE, which could not be installed/);
+    assert.ok(!fs.existsSync(path.join(pluginsDir, 'addon')));
+});
+
+test('batch: a dependency requested after its dependent still installs first', async () => {
+    const { pluginsDir, fetch, catalog } = pairSetup([
+        { id: 'base' },
+        { id: 'addon', dependencies: ['base'] },
+    ]);
+    const results = await installer.installCatalogBatch(['addon', 'base'], catalog, { pluginsDir, fetch, installedIds: new Set() });
+    assert.deepStrictEqual(results.map(r => [r.id, r.success]), [['base', true], ['addon', true]]);
+});
+
+test('batch: a conflicting pair installs one and explains the other', async () => {
+    const { pluginsDir, fetch, catalog } = pairSetup([
+        { id: 'one', conflicts: ['two'] },
+        { id: 'two' },
+    ]);
+    const results = await installer.installCatalogBatch(['one', 'two'], catalog, { pluginsDir, fetch, installedIds: new Set() });
+    const byId = Object.fromEntries(results.map(r => [r.id, r]));
+    assert.strictEqual(byId.one.success, true);
+    assert.strictEqual(byId.two.success, false);
+    assert.match(byId.two.message, /conflicts with ONE/);
+    // Same outcome when the one-sided declaration comes second.
+    const reversed = await installer.installCatalogBatch(['two', 'one'], pairSetup([{ id: 'one', conflicts: ['two'] }, { id: 'two' }]).catalog, {
+        pluginsDir: path.join(tmpDir(), 'p'), fetch: async () => { throw new Error('unused'); }, installedIds: new Set(['two']),
+    });
+    assert.strictEqual(reversed.find(r => r.id === 'one').success, false);
+});
+
+test('a symlinked backup root is refused instead of redirecting the previous version', async () => {
+    if (process.platform === 'win32') return;
+    const zip = pluginZip();
+    const { pluginsDir, entry, fetch } = setup(zip);
+    const elsewhere = path.join(path.dirname(pluginsDir), 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    fs.symlinkSync(elsewhere, path.join(pluginsDir, installer.BACKUP_DIR));
+    fs.mkdirSync(path.join(pluginsDir, 'example'));
+    fs.writeFileSync(path.join(pluginsDir, 'example', 'plugin.json'), JSON.stringify({ id: 'example', name: 'Example', version: '0.9.0' }));
+    await assert.rejects(installer.installCatalogEntry(entry, { pluginsDir, fetch }), /backup location/);
+    assert.deepStrictEqual(fs.readdirSync(elsewhere), []);
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(pluginsDir, 'example', 'plugin.json'))).version, '0.9.0');
+});
+
+test('commitInstall silently ignores names outside the catalog install-dir pattern', () => {
+    const root = path.join(tmpDir(), 'plugins');
+    fs.mkdirSync(root);
+    // plugins:remove passes any safe directory name, including ones with dashes.
+    for (const name of ['my-plugin', '..', 'a/b', '']) assert.doesNotThrow(() => installer.commitInstall(root, name), name);
 });

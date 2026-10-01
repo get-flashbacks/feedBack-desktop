@@ -5,4 +5,4 @@
 # they are excluded from analysis; production code under src/ and scripts/ is
 # still analyzed.
 exclude_paths:
-  - "tests/**/*.test.js"
+  - "tests/**"
