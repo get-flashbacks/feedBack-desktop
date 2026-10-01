@@ -950,19 +950,19 @@ export function isRestarting(): boolean {
 }
 
 /**
- * Fire-and-forget restart. Returns false when a restart is already in flight
- * and this call was declined, so callers can report that instead of claiming
- * a restart they did not get.
+ * Fire-and-forget restart. Callers that report success to the user must
+ * decline first via isInstallBusy() (plugin-manager.ts), before persisting any
+ * setting. The in-flight check below is only a backstop so a caller that
+ * forgets cannot kill the catalog installer's fresh backend.
  */
-export function restartPython(): boolean {
+export function restartPython(): void {
     if (restartInFlight) {
         console.warn('[python] restart requested while another restart is running; ignoring');
-        return false;
+        return;
     }
     stopPython();
     // Wait a bit for port to be released, then restart
     setTimeout(() => startPython(), 1000);
-    return true;
 }
 
 // Awaitable restart used by the catalog installer: stop the backend, start it
