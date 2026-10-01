@@ -128,12 +128,14 @@ function decodeName(raw: Buffer, flags: number): string {
         if (!Buffer.from(text, 'utf8').equals(raw)) throw new ArchiveError('archive contains an invalid UTF-8 file name');
         return text;
     }
-    // Without the UTF-8 flag the encoding is CP437; accept only the ASCII
-    // subset rather than guess at legacy code pages.
-    for (const byte of raw) {
-        if (byte > 0x7e) throw new ArchiveError('archive contains a non-ASCII file name without UTF-8 encoding');
-    }
-    return raw.toString('latin1');
+    // Without the UTF-8 flag the nominal encoding is CP437, but GitHub's
+    // codeload stores names as UTF-8 bytes and leaves the flag clear, so
+    // reading them as CP437 would mangle every non-ASCII name. Decode as UTF-8
+    // whenever the bytes are valid UTF-8 -- which covers every ASCII name -- and
+    // refuse the rest rather than guess at a legacy code page.
+    const text = raw.toString('utf8');
+    if (Buffer.from(text, 'utf8').equals(raw)) return text;
+    throw new ArchiveError('archive contains a file name that is neither ASCII nor valid UTF-8');
 }
 
 function findEocd(buf: Buffer): number {
@@ -327,7 +329,7 @@ export function extractArchive(buf: Buffer, archive: ParsedArchive, prefix: stri
         const segments = validateEntryPath(relative, DEFAULT_ARCHIVE_LIMITS.maxPathLength);
         const target = path.resolve(root, ...segments);
         const rel = path.relative(root, target);
-        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) {
             throw new ArchiveError('archive entry escapes the install directory');
         }
         if (entry.isDirectory) {

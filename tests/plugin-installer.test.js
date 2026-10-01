@@ -13,17 +13,20 @@ const test = require('node:test');
 const zlib = require('node:zlib');
 const ts = require('typescript');
 
+const ROOT = path.join(__dirname, '..');
+
+// Compile options come from tsconfig.json so the shim cannot drift from what
+// `npm run typecheck` and `npm run build:ts` use.
+const tsconfig = ts.readConfigFile(path.join(ROOT, 'tsconfig.json'), ts.sys.readFile);
+if (tsconfig.error) throw new Error(ts.flattenDiagnosticMessageText(tsconfig.error.messageText, '\n'));
+const { options: compilerOptions } = ts.parseJsonConfigFileContent(tsconfig.config, ts.sys, ROOT);
+
 // Let the installer's `import './plugin-archive'` resolve to the .ts source.
 require.extensions['.ts'] = function compileTs(module, filename) {
     const source = fs.readFileSync(filename, 'utf8');
-    const { outputText } = ts.transpileModule(source, {
-        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
-        fileName: filename,
-    });
+    const { outputText } = ts.transpileModule(source, { compilerOptions, fileName: filename });
     module._compile(outputText, filename);
 };
-
-const ROOT = path.join(__dirname, '..');
 const archiveMod = require(path.join(ROOT, 'src/main/plugin-archive.ts'));
 const installer = require(path.join(ROOT, 'src/main/plugin-installer.ts'));
 
@@ -189,6 +192,18 @@ test('archive paths: traversal, absolute, drive, backslash, and reserved names a
         const zip = makeZip([{ name: PREFIX }, { name, data: 'x' }]);
         assert.throws(() => archiveMod.parseArchive(zip), archiveMod.ArchiveError, name);
     }
+});
+
+test('names that merely start with dots are not treated as traversal', () => {
+    // GitHub stores names as UTF-8 with the UTF-8 flag clear, so a non-ASCII
+    // name has to decode as UTF-8 rather than be rejected as CP437.
+    const zip = pluginZip({ extra: [{ name: '..config/', data: undefined }, { name: '..dotfile.js', data: 'x' }, { name: 'ünïcode/日本語.js', data: 'y' }] });
+    const parsed = archiveMod.parseArchive(zip);
+    const dest = path.join(tmpDir(), 'out');
+    archiveMod.extractArchive(zip, parsed, PREFIX, dest);
+    assert.ok(listTree(dest).includes('..config/'));
+    assert.ok(listTree(dest).includes('..dotfile.js'));
+    assert.ok(listTree(dest).includes('ünïcode/日本語.js'), 'a UTF-8 name without the UTF-8 flag decodes');
 });
 
 test('symbolic links and special files are rejected', () => {
@@ -508,6 +523,57 @@ test('batch: a failed activation restores the previous version and restarts once
     assert.match(results[0].message, /previous version was restored/);
     assert.strictEqual(restarts, 1);
     assert.strictEqual(JSON.parse(fs.readFileSync(path.join(pluginsDir, 'alpha', 'plugin.json'))).version, '0.5.0');
+});
+
+test('batch: an unconfirmed activation keeps the backup and says so', async () => {
+    const { pluginsDir, catalog, fetch } = batchSetup();
+    fs.mkdirSync(path.join(pluginsDir, 'alpha'));
+    fs.writeFileSync(path.join(pluginsDir, 'alpha', 'plugin.json'), JSON.stringify({ id: 'alpha', name: 'A', version: '0.5.0' }));
+    let restarts = 0;
+    const results = await installer.installCatalogBatch(['alpha'], catalog, {
+        pluginsDir,
+        fetch,
+        installedIds: new Set(['alpha']),
+        activate: async () => new Map([['alpha', { ok: true, confirmed: false }]]),
+        restartAfterRollback: async () => { restarts++; },
+    });
+    assert.strictEqual(results[0].success, true);
+    assert.match(results[0].message, /activation was not confirmed/);
+    // The only copy of the version the user was running must survive.
+    assert.ok(installer.hasBackup(pluginsDir, 'alpha'), 'backup is kept for an unconfirmed install');
+    assert.strictEqual(restarts, 0);
+    assert.strictEqual(await installer.rollbackInstall(pluginsDir, 'alpha'), 'restored');
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(pluginsDir, 'alpha', 'plugin.json'))).version, '0.5.0');
+});
+
+test('batch: a confirmed activation still commits the backup', async () => {
+    const { pluginsDir, catalog, fetch } = batchSetup();
+    fs.mkdirSync(path.join(pluginsDir, 'alpha'));
+    fs.writeFileSync(path.join(pluginsDir, 'alpha', 'plugin.json'), JSON.stringify({ id: 'alpha', name: 'A', version: '0.5.0' }));
+    const results = await installer.installCatalogBatch(['alpha'], catalog, {
+        pluginsDir,
+        fetch,
+        installedIds: new Set(['alpha']),
+        activate: async (outcomes) => new Map(outcomes.map(o => [o.id, { ok: true, confirmed: true }])),
+    });
+    assert.strictEqual(results[0].success, true);
+    assert.ok(!installer.hasBackup(pluginsDir, 'alpha'));
+});
+
+test('batch: an activation check that throws keeps the backup', async () => {
+    const { pluginsDir, catalog, fetch } = batchSetup();
+    fs.mkdirSync(path.join(pluginsDir, 'alpha'));
+    fs.writeFileSync(path.join(pluginsDir, 'alpha', 'plugin.json'), JSON.stringify({ id: 'alpha', name: 'A', version: '0.5.0' }));
+    const results = await installer.installCatalogBatch(['alpha'], catalog, {
+        pluginsDir,
+        fetch,
+        installedIds: new Set(['alpha']),
+        activate: async () => { throw new Error('ECONNRESET'); },
+    });
+    assert.strictEqual(results[0].success, true);
+    assert.match(results[0].message, /Restart the app/);
+    assert.ok(installer.hasBackup(pluginsDir, 'alpha'), 'backup survives an unusable activation check');
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(pluginsDir, 'alpha', 'plugin.json'))).version, '1.0.0');
 });
 
 test('batch: no activation or restart happens when nothing was installed', async () => {
