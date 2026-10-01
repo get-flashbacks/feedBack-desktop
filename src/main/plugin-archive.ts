@@ -321,6 +321,8 @@ export function singleRootPrefix(archive: ParsedArchive): string {
  * never follow something outside `destDir`.
  */
 export function extractArchive(buf: Buffer, archive: ParsedArchive, prefix: string, destDir: string): void {
+    // destDir is the installer's own staging path, never archive content
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const root = path.resolve(destDir);
     fs.mkdirSync(root, { recursive: false });
     for (const entry of archive.entries) {
@@ -328,6 +330,8 @@ export function extractArchive(buf: Buffer, archive: ParsedArchive, prefix: stri
         const relative = entry.name.slice(prefix.length);
         if (relative === '') continue; // the root directory entry itself
         const segments = validateEntryPath(relative, DEFAULT_ARCHIVE_LIMITS.maxPathLength);
+        // segments passed validateEntryPath; containment is re-checked right below
+        // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
         const target = path.resolve(root, ...segments);
         const rel = path.relative(root, target);
         if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) {

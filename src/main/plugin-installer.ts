@@ -93,7 +93,11 @@ export function resolveSafePluginDir(pluginsDir: string, name: string): string |
     // `name` may arrive over IPC and may not be a string; guard before
     // path.resolve (which throws on non-string args).
     if (typeof name !== 'string' || !name || !SAFE_PLUGIN_NAME.test(name)) return null;
+    // name matched SAFE_PLUGIN_NAME above; containment is re-checked below
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const root = path.resolve(pluginsDir);
+    // name matched SAFE_PLUGIN_NAME above; containment is re-checked below
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const target = path.resolve(root, name);
     const rel = path.relative(root, target);
     if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) {
@@ -379,6 +383,8 @@ export interface InstallOutcome {
 
 function readInstalledManifest(dir: string): Record<string, unknown> | null {
     try {
+        // dir is a validated plugin directory; the file name is a literal
+        // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
         const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'plugin.json'), 'utf8'));
         return isObject(parsed) ? parsed : null;
     } catch {
@@ -388,6 +394,8 @@ function readInstalledManifest(dir: string): Record<string, unknown> | null {
 
 /** Remove leftover staging directories from an interrupted install. */
 export function cleanupStaging(pluginsDir: string): void {
+    // literal directory name under the trusted plugins root
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     rmQuiet(path.join(pluginsDir, STAGING_DIR));
 }
 
@@ -400,6 +408,8 @@ export function backupPathFor(pluginsDir: string, installDir: string): string {
     if (typeof installDir !== 'string' || !INSTALL_DIR_PATTERN.test(installDir)) {
         throw new InstallError('Invalid plugin.');
     }
+    // installDir is checked against INSTALL_DIR_PATTERN above
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     return path.join(pluginsDir, BACKUP_DIR, installDir);
 }
 
@@ -447,6 +457,8 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
     if (opts.protectedIds?.has(entry.id)) {
         throw new InstallError(`${entry.name} ships with the application and cannot be replaced by a separate install.`);
     }
+    // pluginsDir comes from app.getPath, not from user input
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const pluginsDir = path.resolve(opts.pluginsDir);
     const dest = resolveSafePluginDir(pluginsDir, entry.installDir);
     if (!dest) throw new InstallError(`${entry.name} has an invalid install location.`);
@@ -457,9 +469,15 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
     const buffer = await downloadArchive(entry, opts.fetch);
     const verified = verifyArchive(buffer, entry, opts.limits);
 
+    // literal directory name under the trusted plugins root
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const stagingRoot = path.join(pluginsDir, STAGING_DIR);
     fs.mkdirSync(stagingRoot, { recursive: true });
+    // entry.installDir was validated by validateCatalogEntry
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const work = fs.mkdtempSync(path.join(stagingRoot, `${entry.installDir}-`));
+    // literal segment under a private mkdtemp directory
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const staged = path.join(work, 'plugin');
     try {
         try {
@@ -492,6 +510,8 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
                 // An earlier install was never confirmed; its backup is the
                 // last version known to work, so keep it and discard the
                 // unconfirmed copy currently in place.
+                // literal segment under a private mkdtemp directory
+                // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
                 displaced = path.join(work, 'unconfirmed');
             } else {
                 displaced = backup;
@@ -541,6 +561,8 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
 /** Activation succeeded: drop the backup of the previous version. */
 export function commitInstall(pluginsDir: string, installDir: string): void {
     if (!INSTALL_DIR_PATTERN.test(installDir)) return;
+    // pluginsDir is trusted; installDir is validated inside backupPathFor
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     rmQuiet(backupPathFor(path.resolve(pluginsDir), installDir));
 }
 
@@ -558,10 +580,16 @@ export async function rollbackInstall(pluginsDir: string, installDir: string): P
         rmQuiet(dest);
         return 'removed';
     }
+    // literal directory name under the trusted plugins root
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const stagingRoot = path.join(root, STAGING_DIR);
     fs.mkdirSync(stagingRoot, { recursive: true });
+    // installDir was validated at the top of this function
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
     const work = fs.mkdtempSync(path.join(stagingRoot, `${installDir}-rollback-`));
     try {
+        // literal segment under a private mkdtemp directory
+        // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal
         const failed = path.join(work, 'failed');
         if (fs.existsSync(dest)) await renameWithRetry(dest, failed);
         try {
