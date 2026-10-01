@@ -99,15 +99,26 @@ bundled catalog and builds the one URL it will download:
 - **Activation.** The previous version is renamed into
   `.feedback-backups/<installDir>` and the staged tree is renamed into place.
   If the second rename fails, the previous version is renamed back. Renames
-  retry on transient Windows `EPERM`/`EBUSY`.
+  retry on transient Windows `EPERM`/`EBUSY`. The reported message only claims
+  the previous version was kept when it demonstrably survived: either the
+  restore landed, or the backup slot still holds a copy that
+  `rollbackCatalog` can put back.
 - **Batches.** Each plugin is installed on its own, so one failure never
   affects the others. After all disk work, the backend restarts **once**.
   `/api/plugins` is then polled until each new plugin leaves `installing`.
+  A probe that does not answer (socket error, timeout, or a body that is not
+  the documented array) is retried and never counts as a load failure for any
+  plugin. A plugin missing from an answer that did arrive stays pending for a
+  grace window, so a plugin enumerated a poll or two late is not rolled back.
   - If a plugin reaches `ready` or `disabled` at the expected version, its
     backup is deleted.
-  - If a plugin is `failed`, missing, or at the wrong version, its backup is
-    restored (or the new install is removed if there was no previous
-    version). The backend then restarts one more time.
+  - If a plugin is `failed`, still missing after the grace window, or at the
+    wrong version, its backup is restored (or the new install is removed if
+    there was no previous version). The backend then restarts one more time.
+  - If the 10-minute deadline passes while a plugin is still installing
+    dependencies, the outcome is **unconfirmed**: reported as such, and the
+    backup is kept rather than deleted. The next install of the same id, or an
+    explicit `rollbackCatalog`, resolves it.
 - **Unconfirmed installs.** If a second update arrives before the first is
   confirmed, the existing backup is kept as the last known-good version.
 - **User data.** Plugin settings and data live in the config directory and

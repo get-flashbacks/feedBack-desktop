@@ -43,8 +43,13 @@ jobs:
       - name: TypeScript type check
         run: npm run typecheck
 
-      - name: Run JavaScript tests
+      # Named explicitly rather than globbed: `npm test` also picks up suites
+      # that need the JUCE submodule and native build, which CI does not build.
+      - name: Run plugin catalog tests
         run: node --test tests/plugin-catalog.test.js
+
+      - name: Run plugin installer tests
+        run: node --test tests/plugin-installer.test.js
 
       - name: Check plugin catalog lock
         run: npm run catalog:lock:check

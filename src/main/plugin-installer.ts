@@ -27,6 +27,7 @@ import {
     ArchiveLimits,
     extractArchive,
     parseArchive,
+    ParsedArchive,
     readEntryData,
     singleRootPrefix,
 } from './plugin-archive';
@@ -276,6 +277,7 @@ export function validateManifest(bytes: Buffer, entry: CatalogEntry): PluginMani
 
 export interface VerifiedArchive {
     buffer: Buffer;
+    archive: ParsedArchive;
     prefix: string;
     manifest: PluginManifest;
 }
@@ -304,7 +306,7 @@ export function verifyArchive(buffer: Buffer, entry: CatalogEntry, limits: Archi
             throw new InstallError(`${entry.name} does not contain a plugin.json.`);
         }
         const manifest = validateManifest(readEntryData(buffer, manifestEntry), entry);
-        return { buffer, prefix, manifest };
+        return { buffer, archive, prefix, manifest };
     } catch (e) {
         if (e instanceof ArchiveError) throw new InstallError(`The archive for ${entry.name} was rejected: ${e.message}.`);
         throw e;
@@ -445,7 +447,7 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
     const staged = path.join(work, 'plugin');
     try {
         try {
-            extractArchive(verified.buffer, parseArchive(verified.buffer, opts.limits), verified.prefix, staged);
+            extractArchive(verified.buffer, verified.archive, verified.prefix, staged);
         } catch (e) {
             if (e instanceof ArchiveError) throw new InstallError(`The archive for ${entry.name} was rejected: ${e.message}.`);
             console.error('[plugin-installer] extraction failed', e);
@@ -487,14 +489,29 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
             await renameWithRetry(staged, dest);
         } catch (e) {
             console.error('[plugin-installer] activation rename failed', e);
+            let restoreFailed = false;
             if (displaced) {
                 try {
                     await renameWithRetry(displaced, dest);
                 } catch (restoreError) {
+                    restoreFailed = true;
                     console.error('[plugin-installer] could not restore previous version', restoreError);
                 }
             }
-            throw new InstallError(`${entry.name} could not be installed. Your previous version was kept.`);
+            // Only claim the previous version survived when it demonstrably
+            // did: the restore landed, or the backup slot still holds a copy
+            // the Plugin Manager can put back (that is what `canRollback`
+            // reports).
+            if (hadPrevious && !restoreFailed) {
+                throw new InstallError(`${entry.name} could not be installed. Your previous version was kept.`);
+            }
+            if (hadPrevious && hasBackup(pluginsDir, entry.installDir)) {
+                throw new InstallError(
+                    `${entry.name} could not be installed, and the version it replaced could not be put back. `
+                    + 'Use "Restore previous version" in the Plugin Manager to recover it.',
+                );
+            }
+            throw new InstallError(`${entry.name} could not be installed.`);
         }
         return { id: entry.id, installDir: entry.installDir, version: entry.version, hadPrevious };
     } finally {
@@ -553,6 +570,8 @@ export interface BatchItemResult {
 export interface ActivationStatus {
     ok: boolean;
     message?: string;
+    /** False only when activation was never confirmed by the backend probe. */
+    confirmed?: boolean;
 }
 
 export interface BatchOptions extends InstallerOptions {
@@ -625,8 +644,16 @@ export async function installCatalogBatch(ids: string[], catalog: Catalog, opts:
     for (const outcome of outcomes) {
         const result = results.find(r => r.id === outcome.id)!;
         const status = statuses.get(outcome.id);
-        if (status?.ok) {
+        if (status?.ok && status.confirmed !== false) {
             commitInstall(opts.pluginsDir, outcome.installDir);
+            continue;
+        }
+        if (status?.ok) {
+            // Unconfirmed: keep the backup so a later confirmation can still
+            // decide to commit, and report the uncertainty rather than deleting
+            // the previous version on the strength of a status nobody observed.
+            result.message = `${result.name} is still installing dependencies; activation was not confirmed by the server.`
+                + ' Restart the app to re-check activation.';
             continue;
         }
         rolledBack = true;

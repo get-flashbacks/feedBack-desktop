@@ -255,23 +255,54 @@ function scanPluginDir(dir: string): { ids: Set<string>; bundledIds: Set<string>
     return { ids, bundledIds };
 }
 
+// A cold backend enumerating its plugins can take well over 5s to answer, and
+// the request is destroyed mid-response on timeout, so allow generous headroom.
+const PROBE_TIMEOUT_MS = 20000;
+// How long a plugin may be absent from an answer that did arrive before it is
+// called a load failure.
+const MISSING_ROW_GRACE_MS = 30000;
+
 function fetchLoadedPlugins(port: number): Promise<any[]> {
     return new Promise((resolve, reject) => {
         const req = http.get(`http://127.0.0.1:${port}/api/plugins`, (res) => {
             const chunks: Buffer[] = [];
             res.on('data', (c: Buffer) => chunks.push(c));
             res.on('end', () => {
+                let parsed: unknown;
                 try {
-                    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
-                    resolve(Array.isArray(parsed) ? parsed : []);
+                    parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
                 } catch (e) {
                     reject(e);
+                    return;
                 }
+                // A body that is not the documented array is an unusable answer,
+                // not an answer of "no plugins loaded" — reject so the caller
+                // retries instead of failing every plugin.
+                if (!Array.isArray(parsed)) {
+                    reject(new Error('unexpected /api/plugins response'));
+                    return;
+                }
+                resolve(parsed);
             });
         });
         req.on('error', reject);
-        req.setTimeout(5000, () => req.destroy(new Error('timeout')));
+        req.setTimeout(PROBE_TIMEOUT_MS, () => req.destroy(new Error('timeout')));
     });
+}
+
+/**
+ * The deadline passed with nothing conclusive: the plugin may still be
+ * installing dependencies, or the probe never answered. Not a failure, but
+ * not a confirmation either, so the backup is left in place.
+ */
+function unconfirmed(statuses: Map<string, ActivationStatus>, outcomes: InstallOutcome[]): Map<string, ActivationStatus> {
+    for (const outcome of outcomes) {
+        if (!statuses.has(outcome.id)) {
+            statuses.set(outcome.id, { ok: true, confirmed: false });
+            console.warn(`[plugins] ${outcome.id} activation unconfirmed; keeping the previous version as a fallback`);
+        }
+    }
+    return statuses;
 }
 
 // Restart the backend once, then wait for each freshly installed plugin to
@@ -282,17 +313,33 @@ async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string
     const port = await restartPythonAndWait();
     const deadline = Date.now() + 10 * 60 * 1000;
     const statuses = new Map<string, ActivationStatus>();
+    // A row that is missing from an answer is not yet conclusive: the backend
+    // may enumerate a freshly installed plugin a poll or two late. Only after
+    // this grace window has passed does a missing row become a load failure.
+    const missingSince = new Map<string, number>();
     for (;;) {
-        let rows: any[] = [];
+        let rows: any[] | null = null;
         try {
             rows = await fetchLoadedPlugins(port);
-        } catch { /* transient — retry until the deadline */ }
+        } catch {
+            // The probe did not answer. That says nothing about any plugin, so
+            // keep polling instead of evaluating statuses.
+            rows = null;
+        }
+        if (rows === null) {
+            if (Date.now() > deadline) return unconfirmed(statuses, outcomes);
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+        }
         const byId = new Map(rows.filter(r => r && typeof r.id === 'string').map(r => [r.id, r]));
         let pending = false;
         for (const outcome of outcomes) {
             const row = byId.get(outcome.id);
             if (row?.status === 'installing') { pending = true; continue; }
             if (!row) {
+                const since = missingSince.get(outcome.id) ?? Date.now();
+                missingSince.set(outcome.id, since);
+                if (Date.now() - since < MISSING_ROW_GRACE_MS) { pending = true; continue; }
                 statuses.set(outcome.id, { ok: false, message: 'it was not loaded by the server' });
             } else if (row.status === 'failed') {
                 statuses.set(outcome.id, { ok: false, message: 'the server reported a load error' });
@@ -300,21 +347,11 @@ async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string
             } else if (row.version !== outcome.version) {
                 statuses.set(outcome.id, { ok: false, message: 'a different copy was loaded instead' });
             } else {
-                statuses.set(outcome.id, { ok: true });
+                statuses.set(outcome.id, { ok: true, confirmed: true });
             }
         }
         if (!pending) return statuses;
-        if (Date.now() > deadline) {
-            for (const outcome of outcomes) {
-                if (!statuses.has(outcome.id)) {
-                    // Still installing dependencies: not a failure, keep the
-                    // backup until a later activation can be confirmed.
-                    statuses.set(outcome.id, { ok: true });
-                    console.warn(`[plugins] ${outcome.id} still installing dependencies; activation unconfirmed`);
-                }
-            }
-            return statuses;
-        }
+        if (Date.now() > deadline) return unconfirmed(statuses, outcomes);
         statuses.clear();
         await new Promise(r => setTimeout(r, 2000));
     }
