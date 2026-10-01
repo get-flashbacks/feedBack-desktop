@@ -12,7 +12,8 @@ import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { isRestarting, restartPython } from './python';
+import { restartPython } from './python';
+import { isInstallBusy } from './plugin-manager';
 import type { SavedWindowBounds } from './window-bounds';
 
 // ── Source of truth for the high-quality soundfont ──────────────────────────
@@ -269,13 +270,11 @@ export function initSoundfontManager(getMainWindow: () => BrowserWindow | null):
         }
         // Decline before persisting so the stored quality never differs from
         // what the running audio engine was started with.
-        if (isRestarting()) {
-            return { success: false, message: 'A plugin installation is restarting the audio engine. Try again in a moment.' };
+        if (isInstallBusy()) {
+            return { success: false, message: 'A plugin installation is in progress. Try again when it finishes.' };
         }
         setDesktopConfig({ soundfontQuality: quality });
-        if (!restartPython()) {
-            return { success: false, message: 'A plugin installation is restarting the audio engine. Try again in a moment.' };
-        }
+        restartPython();
         return { success: true, message: 'Restarting audio engine…' };
     });
 

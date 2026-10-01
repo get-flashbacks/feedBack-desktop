@@ -105,7 +105,7 @@ crashReporter.start({
     uploadToServer: false,
     compress: false,
 });
-import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, isRestarting, getLanUrls, getConfigDir } from './python';
+import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, getLanUrls, getConfigDir } from './python';
 import { runConfigMigrations } from './config-migrations';
 import { registerMaintenanceHandlers } from './config-reset';
 import {
@@ -122,7 +122,7 @@ import {
 } from './ipc-channels';
 import { initAudioBridge, shutdownAudio } from './audio-bridge';
 import { initDebugLogging, isDebugEnabled } from './debug-log';
-import { initPluginManager } from './plugin-manager';
+import { initPluginManager, isInstallBusy } from './plugin-manager';
 import { initSoundfontManager, getDesktopConfig, setDesktopConfig } from './soundfont-manager';
 import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
@@ -1326,18 +1326,14 @@ async function startup(): Promise<void> {
         const on = enabled === true;
         // Decline before persisting: saving a bind address the backend never
         // adopts would leave the stored setting and the live server disagreeing.
-        if (isRestarting()) {
-            return { success: false, enabled: !!getDesktopConfig().lanAccess, urls: getLanUrls(), message: 'A plugin installation is restarting the server. Try again in a moment.' };
+        if (isInstallBusy()) {
+            return { success: false, enabled: !!getDesktopConfig().lanAccess, urls: getLanUrls(), message: 'A plugin installation is in progress. Try again when it finishes.' };
         }
         setDesktopConfig({ lanAccess: on });
         // Re-spawn uvicorn with the new --host. Same port is reused (the old
         // process releases it first), so the already-loaded 127.0.0.1
         // renderer keeps working once the backend is back up.
-        if (!restartPython()) {
-            // Another restart owns the backend right now; the setting is
-            // persisted but the new bind address needs a restart we declined.
-            return { success: false, enabled: on, urls: getLanUrls(), message: 'A plugin installation is restarting the server. Try again in a moment.' };
-        }
+        restartPython();
         // Wait for the backend to actually rebind before resolving, so the UI
         // doesn't hand out a LAN URL that 404s during the ~restart window. If
         // it doesn't come back in time we still report the intended state —

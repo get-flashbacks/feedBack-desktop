@@ -332,6 +332,9 @@ async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string
             rows = null;
         }
         if (rows === null) {
+            // An outage says nothing about a missing row, so the grace window
+            // must not keep ageing across it.
+            missingSince.clear();
             if (Date.now() > deadline) return unconfirmed(statuses, outcomes);
             await new Promise(r => setTimeout(r, 2000));
             continue;
@@ -367,6 +370,16 @@ async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string
 
 let catalogBusy = false;
 const MAX_CATALOG_SELECTION = 200;
+
+/**
+ * True for the whole of a catalog install or rollback (download, swap, backend
+ * restart and activation poll), not just while a restart is running. Anything
+ * else that would restart the backend must decline while this holds, or it
+ * kills the server the activation poll is probing.
+ */
+export function isInstallBusy(): boolean {
+    return catalogBusy || isRestarting();
+}
 
 async function installFromCatalog(ids: unknown): Promise<{ success: boolean; message: string; results: unknown[] }> {
     if (!Array.isArray(ids) || ids.length === 0) {
@@ -487,8 +500,8 @@ export function initPluginManager(): void {
     });
 
     ipcMain.handle('plugins:restart', () => {
-        if (catalogBusy || isRestarting()) {
-            return { success: false, message: 'A plugin installation is restarting the server. Try again in a moment.' };
+        if (isInstallBusy()) {
+            return { success: false, message: 'A plugin installation is in progress. Try again when it finishes.' };
         }
         restartPython();
         return { success: true, message: 'Restarting server...' };
