@@ -500,6 +500,11 @@ const feedBackDesktopApi = {
         remove: (name: string) => ipcRenderer.invoke('plugins:remove', name),
         update: (name: string) => ipcRenderer.invoke('plugins:update', name),
         listInstalled: () => ipcRenderer.invoke('plugins:listInstalled'),
+        // Curated catalog (no Git required): list entries with install state,
+        // install a batch by id (one backend restart), restore a backup.
+        catalog: () => ipcRenderer.invoke('plugins:catalog'),
+        installCatalog: (ids: string[]) => ipcRenderer.invoke('plugins:installCatalog', ids),
+        rollbackCatalog: (id: string) => ipcRenderer.invoke('plugins:rollbackCatalog', id),
     },
 
     // Soundfont (Audio Quality preference for GP5 → audio rendering)

@@ -946,4 +946,21 @@ export function restartPython(): void {
     setTimeout(() => startPython(), 1000);
 }
 
-export { getPluginsDir, getConfigDir, getDLCDir };
+// Awaitable restart used by the catalog installer: stop the backend, start it
+// again and resolve with the port once it is serving, so the caller can probe
+// /api/plugins to confirm freshly installed plugins actually activated.
+export async function restartPythonAndWait(): Promise<number> {
+    stopPython();
+    await new Promise((r) => setTimeout(r, 1000));
+    await startPython();
+    return await waitForPython();
+}
+
+// The packaged (read-only) core plugins directory. Plugins there that carry
+// `"bundled": true` always win over a user-installed copy with the same id,
+// so the catalog installer refuses to "install" over them.
+function getCorePluginsDir(): string {
+    return path.join(findSlopsmithDir(), 'plugins');
+}
+
+export { getPluginsDir, getConfigDir, getDLCDir, getCorePluginsDir };

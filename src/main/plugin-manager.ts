@@ -1,11 +1,33 @@
-// Plugin Manager — handles installation, removal, and updates
-// of Slopsmith plugins via git operations.
+// Plugin Manager — handles installation, removal, and updates of plugins.
+// Curated plugins install from the bundled catalog without Git (see
+// plugin-installer.ts); the legacy git clone/pull paths remain for
+// developer-supplied repository URLs.
 
-import { ipcMain } from 'electron';
+import { app, ipcMain } from 'electron';
 import { execFile } from 'child_process';
+import * as http from 'http';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getPluginsDir, restartPython } from './python';
+import {
+    getCorePluginsDir,
+    getPluginsDir,
+    restartPython,
+    restartPythonAndWait,
+} from './python';
+import {
+    ActivationStatus,
+    Catalog,
+    FetchLike,
+    InstallError,
+    InstallOutcome,
+    cleanupStaging,
+    commitInstall,
+    hasBackup,
+    installCatalogBatch,
+    loadCatalog,
+    resolveSafePluginDir,
+    rollbackInstall,
+} from './plugin-installer';
 
 // Run git with an explicit argv array — never via a shell. This removes the
 // OS command-injection vector that `exec(`git clone ${gitUrl} ...`)` had:
@@ -20,22 +42,8 @@ function execFileAsync(file: string, args: string[], cwd?: string): Promise<stri
 }
 
 // Plugin directory names are a single path segment directly under the
-// plugins dir. Reject separators, traversal, and leading dot/dash so a
-// renderer-supplied `name` can't escape the plugins dir (which would let
-// remove/update/install operate on an arbitrary directory).
-const SAFE_PLUGIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-function resolveSafePluginDir(pluginsDir: string, name: string): string | null {
-    // `name` arrives over IPC and may not be a string; guard before
-    // path.resolve (which throws on non-string args).
-    if (typeof name !== 'string' || !name || !SAFE_PLUGIN_NAME.test(name)) return null;
-    const root = path.resolve(pluginsDir);
-    const target = path.resolve(root, name);
-    const rel = path.relative(root, target);
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) {
-        return null;
-    }
-    return target;
-}
+// plugins dir — see resolveSafePluginDir in plugin-installer.ts, shared by the
+// git paths below and the catalog installer.
 
 // Require a well-formed https:// URL with a hostname so a renderer can't
 // point git at a local path / file:// / ext:: transport (or a malformed
@@ -166,6 +174,9 @@ async function removePlugin(name: string): Promise<{ success: boolean; message: 
 
     try {
         fs.rmSync(targetDir, { recursive: true });
+        // Drop any catalog-install backup too, so a later install of the same
+        // plugin can never "restore" a version the user removed.
+        commitInstall(pluginsDir, name);
         return { success: true, message: `Removed "${name}". Restart to take effect.` };
     } catch (e: any) {
         return { success: false, message: `Failed to remove: ${e.message}` };
@@ -198,7 +209,204 @@ async function updatePlugin(name: string): Promise<{ success: boolean; message: 
     }
 }
 
+// ── Catalog installation ────────────────────────────────────────────────
+
+let cachedCatalog: Catalog | null = null;
+function getCatalog(): Catalog {
+    if (!cachedCatalog) {
+        const catalogPath = app.isPackaged
+            ? path.join(process.resourcesPath, 'plugin-catalog.json')
+            : path.join(__dirname, '..', '..', 'resources', 'plugin-catalog.json');
+        cachedCatalog = loadCatalog(catalogPath);
+    }
+    return cachedCatalog;
+}
+
+function readManifest(dir: string): Record<string, any> | null {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'plugin.json'), 'utf-8'));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+// Mirrors the backend's _is_bundled(): a core plugin wins over a user copy
+// only when it sits directly in the core plugins dir, its manifest says
+// `"bundled": true`, and its directory name equals its id. Any other core
+// plugin with the same id is overridden by the user-installed copy, because
+// the backend scans the user plugins dir first.
+function scanPluginDir(dir: string): { ids: Set<string>; bundledIds: Set<string> } {
+    const ids = new Set<string>();
+    const bundledIds = new Set<string>();
+    let entries: fs.Dirent[] = [];
+    try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return { ids, bundledIds };
+    }
+    for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        const manifest = readManifest(path.join(dir, entry.name));
+        if (!manifest || typeof manifest.id !== 'string') continue;
+        ids.add(manifest.id);
+        if (manifest.bundled === true && entry.name === manifest.id) bundledIds.add(manifest.id);
+    }
+    return { ids, bundledIds };
+}
+
+function fetchLoadedPlugins(port: number): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+        const req = http.get(`http://127.0.0.1:${port}/api/plugins`, (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+                    resolve(Array.isArray(parsed) ? parsed : []);
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(5000, () => req.destroy(new Error('timeout')));
+    });
+}
+
+// Restart the backend once, then wait for each freshly installed plugin to
+// leave the "installing" state (its pip requirements install in the
+// background) and report whether it reached ready/disabled at the expected
+// version.
+async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string, ActivationStatus>> {
+    const port = await restartPythonAndWait();
+    const deadline = Date.now() + 10 * 60 * 1000;
+    const statuses = new Map<string, ActivationStatus>();
+    for (;;) {
+        let rows: any[] = [];
+        try {
+            rows = await fetchLoadedPlugins(port);
+        } catch { /* transient — retry until the deadline */ }
+        const byId = new Map(rows.filter(r => r && typeof r.id === 'string').map(r => [r.id, r]));
+        let pending = false;
+        for (const outcome of outcomes) {
+            const row = byId.get(outcome.id);
+            if (row?.status === 'installing') { pending = true; continue; }
+            if (!row) {
+                statuses.set(outcome.id, { ok: false, message: 'it was not loaded by the server' });
+            } else if (row.status === 'failed') {
+                statuses.set(outcome.id, { ok: false, message: 'the server reported a load error' });
+                if (row.error) console.error(`[plugins] ${outcome.id} failed to activate: ${row.error}`);
+            } else if (row.version !== outcome.version) {
+                statuses.set(outcome.id, { ok: false, message: 'a different copy was loaded instead' });
+            } else {
+                statuses.set(outcome.id, { ok: true });
+            }
+        }
+        if (!pending) return statuses;
+        if (Date.now() > deadline) {
+            for (const outcome of outcomes) {
+                if (!statuses.has(outcome.id)) {
+                    // Still installing dependencies: not a failure, keep the
+                    // backup until a later activation can be confirmed.
+                    statuses.set(outcome.id, { ok: true });
+                    console.warn(`[plugins] ${outcome.id} still installing dependencies; activation unconfirmed`);
+                }
+            }
+            return statuses;
+        }
+        statuses.clear();
+        await new Promise(r => setTimeout(r, 2000));
+    }
+}
+
+let catalogBusy = false;
+
+async function installFromCatalog(ids: unknown): Promise<{ success: boolean; message: string; results: unknown[] }> {
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 200) {
+        return { success: false, message: 'Select at least one plugin to install.', results: [] };
+    }
+    if (catalogBusy) {
+        return { success: false, message: 'Another plugin installation is already running.', results: [] };
+    }
+    catalogBusy = true;
+    try {
+        const pluginsDir = getPluginsDir();
+        cleanupStaging(pluginsDir);
+        const user = scanPluginDir(pluginsDir);
+        const core = scanPluginDir(getCorePluginsDir());
+        const results = await installCatalogBatch(ids as string[], getCatalog(), {
+            pluginsDir,
+            fetch: fetch as unknown as FetchLike,
+            protectedIds: core.bundledIds,
+            installedIds: new Set([...user.ids, ...core.ids]),
+            activate: activateInstalled,
+            restartAfterRollback: async () => { await restartPythonAndWait(); },
+        });
+        const failed = results.filter(r => !r.success).length;
+        const message = failed === 0
+            ? `Installed ${results.length} plugin${results.length === 1 ? '' : 's'}.`
+            : `${results.length - failed} of ${results.length} plugin${results.length === 1 ? '' : 's'} installed.`;
+        return { success: failed === 0, message, results };
+    } catch (e) {
+        console.error('[plugins] catalog install failed', e);
+        const message = e instanceof InstallError ? e.message : 'Plugin installation failed.';
+        return { success: false, message, results: [] };
+    } finally {
+        catalogBusy = false;
+    }
+}
+
+function listCatalog(): unknown[] {
+    const pluginsDir = getPluginsDir();
+    const installed = new Map<string, string>();
+    for (const entry of fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir) : []) {
+        if (entry.startsWith('.')) continue;
+        const manifest = readManifest(path.join(pluginsDir, entry));
+        if (manifest && typeof manifest.id === 'string') installed.set(manifest.id, String(manifest.version ?? ''));
+    }
+    const bundled = scanPluginDir(getCorePluginsDir()).bundledIds;
+    return getCatalog().entries.map(entry => ({
+        ...entry,
+        installedVersion: installed.get(entry.id) ?? null,
+        bundled: bundled.has(entry.id),
+        canRollback: hasBackup(pluginsDir, entry.installDir),
+    }));
+}
+
+async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; message: string }> {
+    const entry = typeof id === 'string' ? getCatalog().byId.get(id) : undefined;
+    if (!entry) return { success: false, message: 'That plugin is not available in the catalog.' };
+    if (catalogBusy) return { success: false, message: 'A plugin installation is running.' };
+    if (!hasBackup(getPluginsDir(), entry.installDir)) {
+        return { success: false, message: `No previous version of ${entry.name} is available.` };
+    }
+    catalogBusy = true;
+    try {
+        await rollbackInstall(getPluginsDir(), entry.installDir);
+        return { success: true, message: `Restored the previous version of ${entry.name}. Restart to activate.` };
+    } catch (e) {
+        return { success: false, message: e instanceof InstallError ? e.message : 'Rollback failed.' };
+    } finally {
+        catalogBusy = false;
+    }
+}
+
 export function initPluginManager(): void {
+    // Remove leftovers from an install interrupted by a crash or power loss.
+    // Backups are deliberately kept for rollback.
+    try { cleanupStaging(getPluginsDir()); } catch { /* best effort */ }
+
+    ipcMain.handle('plugins:catalog', () => listCatalog());
+
+    ipcMain.handle('plugins:installCatalog', async (_event, ids: unknown) => {
+        return await installFromCatalog(ids);
+    });
+
+    ipcMain.handle('plugins:rollbackCatalog', async (_event, id: unknown) => {
+        return await rollbackCatalogPlugin(id);
+    });
+
     ipcMain.handle('plugins:listInstalled', async () => {
         return await listInstalledPlugins();
     });
