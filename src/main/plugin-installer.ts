@@ -84,6 +84,45 @@ const SOURCE_OWNERS: Record<string, string | null> = {
 
 const SAFE_PLUGIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+// Field-level checks for the shapes the catalog, its JSON schema and
+// scripts/validate-plugin-catalog.js all describe. They are exported so the
+// installed-state record (plugin-installed-state.ts) validates against the same
+// patterns instead of a second copy that can drift.
+export function isPluginId(value: unknown): boolean {
+    return typeof value === 'string' && ID_PATTERN.test(value);
+}
+
+export function isInstallDirName(value: unknown): boolean {
+    return typeof value === 'string' && INSTALL_DIR_PATTERN.test(value);
+}
+
+export function isPluginVersion(value: unknown): boolean {
+    return typeof value === 'string' && VERSION_PATTERN.test(value);
+}
+
+export function isCommitSha(value: unknown): boolean {
+    return typeof value === 'string' && COMMIT_PATTERN.test(value);
+}
+
+export function isArchiveDigest(value: unknown): boolean {
+    return typeof value === 'string' && SHA256_PATTERN.test(value);
+}
+
+/**
+ * Owner and repository of an approved `https://github.com/OWNER/REPO` source,
+ * or null for anything else: plain http, another host, a path that escapes the
+ * repository, or a value that is not a string at all.
+ */
+export function repositoryParts(repository: unknown): { owner: string; repo: string } | null {
+    if (typeof repository !== 'string') return null;
+    const match = REPOSITORY_PATTERN.exec(repository);
+    return match ? { owner: match[1], repo: match[2] } : null;
+}
+
+export function isRepositoryUrl(value: unknown): boolean {
+    return repositoryParts(value) !== null;
+}
+
 /**
  * Resolve a single directory name directly under the plugins root, or null
  * if the name could escape it (separators, traversal, leading dot/dash).
@@ -120,12 +159,12 @@ function isStringArray(value: unknown): value is string[] {
 export function validateCatalogEntry(entry: unknown): entry is CatalogEntry {
     if (!isObject(entry)) return false;
     const e = entry as Record<string, unknown>;
-    if (typeof e.id !== 'string' || !ID_PATTERN.test(e.id)) return false;
-    if (typeof e.installDir !== 'string' || !INSTALL_DIR_PATTERN.test(e.installDir)) return false;
+    if (!isPluginId(e.id)) return false;
+    if (!isInstallDirName(e.installDir)) return false;
     if (typeof e.name !== 'string' || !e.name) return false;
-    if (typeof e.version !== 'string' || !VERSION_PATTERN.test(e.version)) return false;
-    if (typeof e.commit !== 'string' || !COMMIT_PATTERN.test(e.commit)) return false;
-    if (typeof e.archiveSha256 !== 'string' || !SHA256_PATTERN.test(e.archiveSha256)) return false;
+    if (!isPluginVersion(e.version)) return false;
+    if (!isCommitSha(e.commit)) return false;
+    if (!isArchiveDigest(e.archiveSha256)) return false;
     if (typeof e.source !== 'string' || !(e.source in SOURCE_OWNERS)) return false;
     if (!isStringArray(e.dependencies) || !isStringArray(e.conflicts)) return false;
     if (!isObject(e.size)) return false;
@@ -134,11 +173,10 @@ export function validateCatalogEntry(entry: unknown): entry is CatalogEntry {
     if ((downloadBytes as number) > MAX_DOWNLOAD_BYTES) return false;
     if (!Number.isInteger(installedBytes) || (installedBytes as number) < 0) return false;
     if ((installedBytes as number) > DEFAULT_ARCHIVE_LIMITS.maxTotalBytes) return false;
-    if (typeof e.repository !== 'string') return false;
-    const match = REPOSITORY_PATTERN.exec(e.repository);
-    if (!match) return false;
+    const parts = repositoryParts(e.repository);
+    if (!parts) return false;
     const requiredOwner = SOURCE_OWNERS[e.source as string];
-    if (requiredOwner && match[1].toLowerCase() !== requiredOwner) return false;
+    if (requiredOwner && parts.owner.toLowerCase() !== requiredOwner) return false;
     return true;
 }
 
@@ -179,11 +217,11 @@ export function loadCatalog(catalogPath: string): Catalog {
 
 /** The only URL the installer will ever download for an entry. */
 export function archiveUrlFor(entry: CatalogEntry): string {
-    const match = REPOSITORY_PATTERN.exec(entry.repository);
-    if (!match || !COMMIT_PATTERN.test(entry.commit)) {
+    const parts = repositoryParts(entry.repository);
+    if (!parts || !isCommitSha(entry.commit)) {
         throw new InstallError(`${entry.name} has an invalid catalog source.`);
     }
-    return `https://${ARCHIVE_HOST}/${match[1]}/${match[2]}/zip/${entry.commit}`;
+    return `https://${ARCHIVE_HOST}/${parts.owner}/${parts.repo}/zip/${entry.commit}`;
 }
 
 export type FetchLike = (url: string, init?: Record<string, unknown>) => Promise<{
