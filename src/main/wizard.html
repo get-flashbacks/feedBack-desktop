@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- No CSP meta: this is a file:// document, where a `script-src 'self'`
+     policy does not reliably match the sibling script. The page is static
+     local markup — no remote content is reachable, and main denies both
+     navigation and window.open for this window (see plugin-wizard.ts). -->
+<title>fee[dB]ack — plugin setup</title>
+<style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        background: #0f172a;
+        color: #e2e8f0;
+        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+    }
+    header {
+        padding: 20px 28px 12px;
+        border-bottom: 1px solid #1e293b;
+    }
+    h1 { margin: 0; font-size: 19px; }
+    h2 { margin: 0 0 4px; font-size: 15px; }
+    main { flex: 1; overflow-y: auto; padding: 20px 28px; }
+    footer {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 28px;
+        border-top: 1px solid #1e293b;
+        background: #0b1220;
+    }
+    footer .spacer { flex: 1; }
+    p.lead { color: #94a3b8; margin: 6px 0 0; }
+    .step { display: none; }
+    .step.active { display: block; }
+    .group { margin-bottom: 22px; }
+    .group-title { font-weight: 600; margin-bottom: 8px; }
+    .group-hint { color: #64748b; font-size: 12px; margin: -4px 0 8px; }
+    .options { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 13px;
+        border: 1px solid #334155;
+        border-radius: 999px;
+        background: #1e293b;
+        cursor: pointer;
+        user-select: none;
+    }
+    .chip:hover { border-color: #64748b; }
+    .chip input { accent-color: #10b981; margin: 0; }
+    .chip.checked { border-color: #10b981; background: #064e3b; }
+    .card {
+        border: 1px solid #1e293b;
+        background: rgba(30, 41, 59, 0.5);
+        border-radius: 10px;
+        padding: 14px 16px;
+    }
+    .row {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        padding: 12px 14px;
+        border: 1px solid #1e293b;
+        border-radius: 10px;
+        background: rgba(30, 41, 59, 0.45);
+        margin-bottom: 8px;
+    }
+    .row.installed { border-color: #14532d; background: rgba(6, 78, 59, 0.25); }
+    .row input[type=checkbox] { margin-top: 3px; accent-color: #10b981; }
+    .row .meta { flex: 1; min-width: 0; }
+    .row .name { font-weight: 600; }
+    .row .desc { color: #94a3b8; font-size: 12px; margin-top: 2px; }
+    .row .tags { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid #334155;
+        color: #94a3b8;
+    }
+    .tag.req { border-color: #f59e0b; color: #fbbf24; }
+    .tag.essential { border-color: #38bdf8; color: #7dd3fc; }
+    .tag.ok { border-color: #10b981; color: #6ee7b7; }
+    .tag.bad { border-color: #ef4444; color: #fca5a5; }
+    .tag.busy { border-color: #a78bfa; color: #c4b5fd; }
+    button {
+        font: inherit;
+        padding: 8px 16px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        cursor: pointer;
+        background: #1e293b;
+        color: #e2e8f0;
+    }
+    button:hover:not(:disabled) { background: #334155; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button.primary { background: #059669; color: #fff; font-weight: 600; }
+    button.primary:hover:not(:disabled) { background: #10b981; }
+    button.danger { background: #7f1d1d; }
+    .note { font-size: 12px; color: #fbbf24; margin-top: 10px; }
+    .muted { color: #64748b; font-size: 12px; }
+    .progress-wrap { margin-top: 16px; }
+    progress { width: 100%; height: 10px; }
+    .summary { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 14px; }
+    .summary div { color: #94a3b8; font-size: 12px; }
+    .summary b { color: #e2e8f0; font-size: 15px; display: block; }
+    ul.plain { margin: 10px 0 0; padding-left: 18px; color: #94a3b8; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+    <h1>Set up your plugins</h1>
+</header>
+
+<main>
+    <!-- 1 · Welcome -->
+    <section class="step" id="step-welcome">
+        <h2>fee[dB]ack works on its own — and grows with plugins</h2>
+        <p class="lead">
+            Playback, practice tools and recording all work right now. Optional plugins add
+            extra visualizers, importers and utilities, and you can install or remove them
+            at any time from the Plugin Manager.
+        </p>
+        <p class="lead">
+            This setup takes a minute. You can skip it and come back to it later.
+        </p>
+    </section>
+
+    <!-- 2 · Questions -->
+    <section class="step" id="step-questions">
+        <h2>What do you play, and what do you want to work on?</h2>
+        <p class="lead">Pick anything that applies. We'll suggest plugins from the catalog and show you the full list before anything is downloaded.</p>
+        <div id="question-instruments" class="group">
+            <div class="group-title">Instruments</div>
+            <div class="group-hint">Leave empty to skip instrument-based suggestions.</div>
+            <div class="options"></div>
+        </div>
+        <div id="question-categories" class="group">
+            <div class="group-title">Features</div>
+            <div class="group-hint">Anything you're curious about. Everything stays optional.</div>
+            <div class="options"></div>
+        </div>
+    </section>
+
+    <!-- 3 · Review -->
+    <section class="step" id="step-review">
+        <h2>Your selection</h2>
+        <p class="lead">Everything is optional except the essentials, which are part of fee[dB]ack itself. Required dependencies are added automatically.</p>
+        <div id="review-list" style="margin-top:16px"></div>
+        <div id="review-note" class="note"></div>
+        <div class="summary">
+            <div><b id="review-count">0</b>selected</div>
+            <div><b id="review-size">0 MB</b>to download</div>
+        </div>
+    </section>
+
+    <!-- 4 · Installing -->
+    <section class="step" id="step-progress">
+        <h2>Installing</h2>
+        <p class="lead" id="progress-line">Downloading your plugins…</p>
+        <div class="progress-wrap"><progress id="progress-bar" value="0" max="100"></progress></div>
+        <div id="progress-list" style="margin-top:16px"></div>
+        <p class="muted">The audio service restarts once at the end so the new plugins load.</p>
+    </section>
+
+    <!-- 5 · Done -->
+    <section class="step" id="step-done">
+        <h2 id="done-title">All set</h2>
+        <p class="lead" id="done-line"></p>
+        <ul class="plain" id="done-list"></ul>
+        <p class="muted" style="margin-top:16px">
+            You can change any of this later in the Plugin Manager.
+        </p>
+    </section>
+</main>
+
+<footer>
+    <button id="btn-back">Back</button>
+    <button id="btn-skip">Skip setup</button>
+    <span class="spacer"></span>
+    <span class="muted" id="footer-hint"></span>
+    <button id="btn-cancel" class="danger" style="display:none">Cancel install</button>
+    <button id="btn-primary" class="primary">Next</button>
+</footer>
+
+<script src="wizard.js"></script>
+</body>
+</html>

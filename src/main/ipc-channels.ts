@@ -48,6 +48,25 @@ export const IPC_POWER_SET_SCREEN_AWAKE = 'power:setScreenAwake' as const;
 export const IPC_WINDOW_GET_START_FULLSCREEN = 'window:getStartFullscreen' as const;
 export const IPC_WINDOW_SET_START_FULLSCREEN = 'window:setStartFullscreen' as const;
 
+// Curated plugin catalog installs (no Git). Progress is pushed to every window
+// so both the first-run wizard and the Plugin Manager's catalog list can drive a
+// progress bar from the same batch, and cancellation is a single shared
+// in-flight abort so the two can never fight over the same download.
+export const IPC_PLUGIN_CATALOG_PROGRESS = 'plugins:installCatalogProgress' as const;
+export const IPC_PLUGIN_CATALOG_CANCEL = 'plugins:cancelCatalogInstall' as const;
+
+// First-run guided plugin selection (issue #5). The wizard is a local window
+// (src/main/wizard.html) driven over these channels; `open` is what the Plugin
+// Manager's "setup wizard" button invokes to bring it back later.
+export const IPC_PLUGIN_WIZARD_OPEN = 'pluginWizard:open' as const;
+export const IPC_PLUGIN_WIZARD_GET_STATE = 'pluginWizard:getState' as const;
+export const IPC_PLUGIN_WIZARD_PREVIEW = 'pluginWizard:preview' as const;
+// Re-resolves the current checkboxes after every toggle, so dependencies and
+// conflicts update the moment a choice changes.
+export const IPC_PLUGIN_WIZARD_RESOLVE = 'pluginWizard:resolve' as const;
+export const IPC_PLUGIN_WIZARD_INSTALL = 'pluginWizard:install' as const;
+export const IPC_PLUGIN_WIZARD_FINISH = 'pluginWizard:finish' as const;
+
 // Detachable panes (feedBack core's window.feedBack.panes).
 //
 // Deliberately tiny. The renderer OPENS its own pane windows with window.open() —

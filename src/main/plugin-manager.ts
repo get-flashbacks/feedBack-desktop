@@ -3,7 +3,7 @@
 // plugin-installer.ts); the legacy git clone/pull paths remain for
 // developer-supplied repository URLs.
 
-import { app, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import { execFile } from 'child_process';
 import * as http from 'http';
 import * as path from 'path';
@@ -21,6 +21,7 @@ import {
     FetchLike,
     InstallError,
     InstallOutcome,
+    InstallProgress,
     cleanupStaging,
     commitInstall,
     hasBackup,
@@ -29,6 +30,7 @@ import {
     resolveSafePluginDir,
     rollbackInstall,
 } from './plugin-installer';
+import { IPC_PLUGIN_CATALOG_CANCEL, IPC_PLUGIN_CATALOG_PROGRESS } from './ipc-channels';
 
 // Run git with an explicit argv array — never via a shell. This removes the
 // OS command-injection vector that `exec(`git clone ${gitUrl} ...`)` had:
@@ -367,7 +369,20 @@ async function activateInstalled(outcomes: InstallOutcome[]): Promise<Map<string
 }
 
 let catalogBusy = false;
+// One in-flight batch, so a cancel from either UI (the first-run wizard or the
+// Plugin Manager) reaches the running download instead of racing a second one.
+let catalogAbort: AbortController | null = null;
 const MAX_CATALOG_SELECTION = 200;
+
+// Ticks are per download chunk, so they are throttled before crossing the IPC
+// boundary (~5/s, like the soundfont downloader).
+const PROGRESS_INTERVAL_MS = 200;
+function broadcastInstallProgress(progress: InstallProgress): void {
+    for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) continue;
+        win.webContents.send(IPC_PLUGIN_CATALOG_PROGRESS, progress);
+    }
+}
 
 /**
  * True for the whole of a catalog install or rollback (download, swap, backend
@@ -379,7 +394,27 @@ export function isInstallBusy(): boolean {
     return catalogBusy || isRestarting();
 }
 
-async function installFromCatalog(ids: unknown): Promise<{ success: boolean; message: string; results: unknown[] }> {
+/**
+ * Abort the running catalog batch. Deliberately does not clear `catalogBusy`:
+ * the batch unwinds on its own and restores the flag, so a cancel can't be
+ * mistaken for "nothing is running" while files are still being swapped.
+ */
+export function cancelCatalogInstall(): { success: boolean; message: string } {
+    if (!catalogAbort) return { success: false, message: 'No plugin installation is running.' };
+    catalogAbort.abort();
+    return { success: true, message: 'Cancelling the plugin installation…' };
+}
+
+export interface CatalogInstallOptions {
+    /** Progress sink; defaults to a throttled broadcast to every window. */
+    onProgress?: (progress: InstallProgress) => void;
+    signal?: AbortSignal;
+}
+
+export async function installFromCatalog(
+    ids: unknown,
+    options: CatalogInstallOptions = {},
+): Promise<{ success: boolean; message: string; results: unknown[] }> {
     if (!Array.isArray(ids) || ids.length === 0) {
         return { success: false, message: 'Select at least one plugin to install.', results: [] };
     }
@@ -390,6 +425,16 @@ async function installFromCatalog(ids: unknown): Promise<{ success: boolean; mes
         return { success: false, message: 'Another plugin installation is already running.', results: [] };
     }
     catalogBusy = true;
+    const controller = new AbortController();
+    catalogAbort = controller;
+    let lastProgressAt = 0;
+    const onProgress = options.onProgress ?? ((progress: InstallProgress) => {
+        const now = Date.now();
+        // Always forward terminal phases; throttle only the byte ticks.
+        if (progress.phase === 'download' && now - lastProgressAt < PROGRESS_INTERVAL_MS) return;
+        lastProgressAt = now;
+        broadcastInstallProgress(progress);
+    });
     try {
         const pluginsDir = getPluginsDir();
         cleanupStaging(pluginsDir);
@@ -402,22 +447,28 @@ async function installFromCatalog(ids: unknown): Promise<{ success: boolean; mes
             installedIds: new Set([...user.ids, ...core.ids]),
             activate: activateInstalled,
             restartAfterRollback: async () => { await restartPythonAndWait(); },
+            onProgress,
+            signal: options.signal ?? controller.signal,
         });
         const failed = results.filter(r => !r.success).length;
-        const message = failed === 0
-            ? `Installed ${results.length} plugin${results.length === 1 ? '' : 's'}.`
-            : `${results.length - failed} of ${results.length} plugin${results.length === 1 ? '' : 's'} installed.`;
-        return { success: failed === 0, message, results };
+        const cancelled = controller.signal.aborted;
+        const message = cancelled
+            ? 'Plugin installation cancelled. You can resume it from the Plugin Manager.'
+            : failed === 0
+                ? `Installed ${results.length} plugin${results.length === 1 ? '' : 's'}.`
+                : `${results.length - failed} of ${results.length} plugin${results.length === 1 ? '' : 's'} installed.`;
+        return { success: failed === 0 && !cancelled, message, results };
     } catch (e) {
         console.error('[plugins] catalog install failed', e);
         const message = e instanceof InstallError ? e.message : 'Plugin installation failed.';
         return { success: false, message, results: [] };
     } finally {
+        catalogAbort = null;
         catalogBusy = false;
     }
 }
 
-function listCatalog(): unknown[] {
+export function listCatalog(): unknown[] {
     let catalog: Catalog;
     try {
         catalog = getCatalog();
@@ -476,6 +527,8 @@ export function initPluginManager(): void {
     ipcMain.handle('plugins:installCatalog', async (_event, ids: unknown) => {
         return await installFromCatalog(ids);
     });
+
+    ipcMain.handle(IPC_PLUGIN_CATALOG_CANCEL, () => cancelCatalogInstall());
 
     ipcMain.handle('plugins:rollbackCatalog', async (_event, id: unknown) => {
         return await rollbackCatalogPlugin(id);
