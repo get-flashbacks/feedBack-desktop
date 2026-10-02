@@ -193,8 +193,10 @@ Behaviour that later lifecycle features depend on:
   rather than silently dropping provenance.
 - **The operations that change the record are lifecycle 2/6** (update, pin,
   downgrade, disable, uninstall), with precedence in 3/6 and rollback in 4/6.
-  Nothing writes the record until then. Two things 2/6 must settle: deleting an
-  installed plugin has to drop or reconcile its record, and the opt-in "also
-  delete installed plugins" reset (`config-paths.ts`) removes only
-  `pluginsDir`, so it has to remove the record too or a full opt-in reset would
-  leave a record claiming plugins that are gone.
+  Nothing writes the record until then. Three things 2/6 must settle: deleting an
+  installed plugin has to drop or reconcile its record, the opt-in "also delete
+  installed plugins" reset (`config-paths.ts`) removes only `pluginsDir`, so it has
+  to remove the record too or a full opt-in reset would leave a record claiming
+  plugins that are gone, and its writers must be serialized — a write re-reads the
+  record to check the schema and then replaces it wholesale, so two concurrent
+  read-modify-write callers would drop each other's entries.

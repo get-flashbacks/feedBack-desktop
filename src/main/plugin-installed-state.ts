@@ -220,10 +220,16 @@ export function readInstalledState(stateDir: string): InstalledState {
  * Atomic: the body is written to `<record>.tmp`, flushed, and renamed over the
  * record, so a reader either sees the previous record or the new one — never a
  * partial file. The containing directory is deliberately not fsynced: Windows
- * cannot open a directory for that, and the record is rebuilt from the bundled
- * catalog for anything the catalog still lists. Throws (rather than silently
- * dropping provenance) if the write cannot be completed, or if the record on
- * disk is newer than this app understands and would therefore be lost.
+ * cannot open a directory for that, and an unflushed directory entry can lose the
+ * rename to a power failure, which leaves the record at its previous state or
+ * missing — both of which read as "bundled baseline only" rather than as a wrong
+ * record. Throws (rather than silently dropping provenance) if the write cannot be
+ * completed, or if the record on disk is newer than this app understands and would
+ * therefore be lost.
+ *
+ * Callers must serialize their writes: the record is re-read to check its schema
+ * and then replaced wholesale, and the temp file has a fixed name, so two
+ * concurrent writers can drop each other's entries.
  */
 export function writeInstalledState(
     stateDir: string,
