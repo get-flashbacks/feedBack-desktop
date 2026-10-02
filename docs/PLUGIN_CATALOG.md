@@ -147,3 +147,56 @@ ignored. The packaged application itself is never modified.
 
 The legacy `plugins:install` / `plugins:update` git paths remain for
 developer-supplied repository URLs. They still require Git.
+
+## Installed-state record
+
+`src/main/plugin-installed-state.ts` persists what is installed for the plugin
+lifecycle (issue #20, lifecycle 1/6 of #6). It writes
+`<userData>/installed-plugins.json` — the desktop's own state dir, not the
+plugins dir, because the record is desktop-owned state *about* that dir and the
+backend scans the plugins dir for plugins.
+
+One record per installed optional plugin, every field required:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | catalog plugin id |
+| `installDir` | directory name under the plugins dir holding this copy |
+| `version` | plugin version, as pinned by the catalog |
+| `repository` | source repository the copy came from |
+| `commit` | commit the archive was resolved to |
+| `archiveSha256` | SHA-256 of the installed archive |
+| `installedAt` | ISO-8601 UTC install time (`Date#toISOString`) |
+| `catalogRevision` | catalog revision the entry was resolved from (the release lock's `catalogSha256`) |
+
+The file is `{"schemaVersion": 1, "updatedAt": …, "plugins": {<id>: <record>}}`.
+Field patterns are shared with the installer (`isPluginId`, `isCommitSha`, … in
+`plugin-installer.ts`) so the record and the catalog gate cannot drift apart.
+One plugin per `id`, one directory per plugin: a write refuses a duplicate.
+
+Behaviour that later lifecycle features depend on:
+
+- **Reads never throw.** A missing, unreadable, oversized, truncated or
+  foreign-schema record yields an empty map plus an `issue` (`missing`,
+  `unreadable`, `corrupt`, `unsupported-schema`), which reads as *bundled
+  baseline only* — the plugins dir stays authoritative. Individual records that
+  fail validation are dropped, so one damaged entry cannot hide the rest.
+- **A newer record is never overwritten.** A schema version above the one this
+  app writes is reported as `unsupported-schema` and `writeInstalledState`
+  refuses, so a downgrade cannot destroy provenance it does not understand.
+  There is no schema below v1 yet; that is where a migration goes.
+- **Writes are atomic.** The body is written to `installed-plugins.json.tmp`
+  (created exclusively, so a symlink planted there is replaced rather than
+  followed), flushed, and renamed over the record, so a crash mid-write leaves
+  either the previous record or the new one. A leftover `.tmp` is ignored by
+  readers and replaced by the next write. A write that cannot complete throws
+  rather than silently dropping provenance.
+- **The operations that change the record are lifecycle 2/6** (update, pin,
+  downgrade, disable, uninstall), with precedence in 3/6 and rollback in 4/6.
+  Nothing writes the record until then. Three things 2/6 must settle: deleting an
+  installed plugin has to drop or reconcile its record, the opt-in "also delete
+  installed plugins" reset (`config-paths.ts`) removes only `pluginsDir`, so it has
+  to remove the record too or a full opt-in reset would leave a record claiming
+  plugins that are gone, and its writers must be serialized — a write re-reads the
+  record to check the schema and then replaces it wholesale, so two concurrent
+  read-modify-write callers would drop each other's entries.
