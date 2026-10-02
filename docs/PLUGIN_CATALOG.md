@@ -162,6 +162,11 @@ leaves the fully working app behind, the wizard can be reopened from the Plugin
 Manager ("Setup wizard"), and an interrupted run resumes without reinstalling
 what already completed.
 
+The wizard window loads a dedicated minimal bridge (`wizard-preload.ts`, in the
+shape of `splash-preload.ts`), not the full desktop preload: it can read catalog
+state and drive the batch it started, and nothing else — no audio engine, no
+destructive maintenance actions.
+
 The decisions are pure functions in `src/main/plugin-selection.ts`, and they are
 **data-driven from the catalog** — no per-plugin UI rules:
 

@@ -225,10 +225,13 @@ export function openWizardWindow(): boolean {
         backgroundColor: '#0f172a',
         autoHideMenuBar: true,
         webPreferences: {
-            preload: path.join(__dirname, 'preload.js'),
+            // Its own minimal bridge (wizard-preload.ts), not the full desktop
+            // one: this document only needs catalog state and the install
+            // batch it started, so the audio engine and the destructive
+            // maintenance actions stay out of its reach.
+            preload: path.join(__dirname, 'wizard-preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
-            // sandbox must be false so the preload can require('electron')
             sandbox: false,
         },
     });
