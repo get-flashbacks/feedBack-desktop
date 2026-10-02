@@ -51,6 +51,9 @@ jobs:
       - name: Run plugin installer tests
         run: node --test tests/plugin-installer.test.js
 
+      - name: Run plugin catalog view tests
+        run: node --test tests/plugin-catalog-view.test.js
+
       - name: Check plugin catalog lock
         run: npm run catalog:lock:check
 

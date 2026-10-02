@@ -417,14 +417,23 @@ async function installFromCatalog(ids: unknown): Promise<{ success: boolean; mes
     }
 }
 
-function listCatalog(): unknown[] {
+// A missing or damaged catalog used to answer with a bare empty array, which
+// the renderer cannot tell apart from a catalog that genuinely offers nothing.
+// Report the failure so the catalog view can say why it is empty. This covers
+// what loadCatalog throws on — a missing, unparseable or wrong-version file.
+// Entries the loader rejects individually are still dropped silently by design,
+// so a catalog whose every entry fails the runtime gate still answers ok.
+function listCatalog(): { ok: boolean; entries: unknown[]; message?: string } {
     let catalog: Catalog;
     try {
         catalog = getCatalog();
     } catch (e) {
-        // A missing or damaged catalog is "nothing to offer", not an IPC error.
         console.error('[plugins] catalog unavailable', e);
-        return [];
+        return {
+            ok: false,
+            entries: [],
+            message: e instanceof InstallError ? e.message : 'The plugin catalog could not be read.',
+        };
     }
     const pluginsDir = getPluginsDir();
     const installed = new Map<string, string>();
@@ -434,12 +443,15 @@ function listCatalog(): unknown[] {
         if (manifest && typeof manifest.id === 'string') installed.set(manifest.id, String(manifest.version ?? ''));
     }
     const bundled = scanPluginDir(getCorePluginsDir()).bundledIds;
-    return catalog.entries.map(entry => ({
-        ...entry,
-        installedVersion: installed.get(entry.id) ?? null,
-        bundled: bundled.has(entry.id),
-        canRollback: hasBackup(pluginsDir, entry.installDir),
-    }));
+    return {
+        ok: true,
+        entries: catalog.entries.map(entry => ({
+            ...entry,
+            installedVersion: installed.get(entry.id) ?? null,
+            bundled: bundled.has(entry.id),
+            canRollback: hasBackup(pluginsDir, entry.installDir),
+        })),
+    };
 }
 
 async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; message: string }> {
