@@ -195,16 +195,59 @@ export type FetchLike = (url: string, init?: Record<string, unknown>) => Promise
 }>;
 
 /**
+ * Progress tick for one plugin of a batch install. `receivedBytes`/`totalBytes`
+ * are only meaningful for the `download` phase; the pinned `totalBytes` is the
+ * catalog's exact archive size, so the ratio is exact rather than a
+ * content-length guess.
+ */
+export interface InstallProgress {
+    id: string;
+    name: string;
+    phase: 'start' | 'download' | 'installed' | 'failed' | 'cancelled';
+    receivedBytes?: number;
+    totalBytes?: number;
+}
+
+export interface DownloadOptions {
+    /** Called as bytes arrive; the callback must not throw. */
+    onProgress?: (receivedBytes: number, totalBytes: number) => void;
+    /** Aborts the transfer (the caller's "cancel" path). */
+    signal?: AbortSignal;
+}
+
+function cancelledError(entry: CatalogEntry): InstallError {
+    return new InstallError(`The download of ${entry.name} was cancelled.`);
+}
+
+/**
+ * Combine the per-download timeout with a caller-supplied cancel signal. Done
+ * here rather than at the call sites so no caller can pass a signal that
+ * silently replaces the timeout (an unbounded download).
+ */
+function downloadSignal(signal?: AbortSignal): AbortSignal {
+    const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+    if (!signal) return timeout;
+    if (signal.aborted) return AbortSignal.abort();
+    if (typeof AbortSignal.any === 'function') return AbortSignal.any([timeout, signal]);
+    return timeout;
+}
+
+/**
  * Download the pinned archive, refusing anything that is not HTTPS from the
  * codeload host, exceeds the pinned size, or fails the pinned SHA-256.
  */
-export async function downloadArchive(entry: CatalogEntry, fetchImpl: FetchLike): Promise<Buffer> {
+export async function downloadArchive(
+    entry: CatalogEntry,
+    fetchImpl: FetchLike,
+    opts: DownloadOptions = {},
+): Promise<Buffer> {
     const url = archiveUrlFor(entry);
     const expected = entry.size.downloadBytes;
     let response;
     try {
-        response = await fetchImpl(url, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+        response = await fetchImpl(url, { redirect: 'follow', signal: downloadSignal(opts.signal) });
     } catch {
+        if (opts.signal?.aborted) throw cancelledError(entry);
         throw new InstallError(`Could not download ${entry.name}. Check your internet connection and try again.`);
     }
     let finalUrl: URL;
@@ -228,6 +271,7 @@ export async function downloadArchive(entry: CatalogEntry, fetchImpl: FetchLike)
     const digest = crypto.createHash('sha256');
     try {
         for await (const chunk of response.body) {
+            if (opts.signal?.aborted) throw cancelledError(entry);
             received += chunk.length;
             if (received > expected) {
                 throw new InstallError(`The download of ${entry.name} is larger than the catalog allows.`);
@@ -235,11 +279,18 @@ export async function downloadArchive(entry: CatalogEntry, fetchImpl: FetchLike)
             const buf = Buffer.from(chunk);
             digest.update(buf);
             chunks.push(buf);
+            try {
+                opts.onProgress?.(received, expected);
+            } catch {
+                // A faulty progress listener must never fail an install.
+            }
         }
     } catch (e) {
         if (e instanceof InstallError) throw e;
+        if (opts.signal?.aborted) throw cancelledError(entry);
         throw new InstallError(`The download of ${entry.name} was interrupted. Please try again.`);
     }
+    if (opts.signal?.aborted) throw cancelledError(entry);
     if (received !== expected) {
         throw new InstallError(`The download of ${entry.name} is incomplete or does not match the catalog.`);
     }
@@ -369,6 +420,10 @@ export interface InstallerOptions {
     /** Plugin ids shipped as `bundled: true` core plugins; these cannot be overridden. */
     protectedIds?: ReadonlySet<string>;
     limits?: ArchiveLimits;
+    /** Progress ticks for this plugin. Callbacks must not throw. */
+    onProgress?: (progress: InstallProgress) => void;
+    /** Cancels the transfer; the live installation is left untouched. */
+    signal?: AbortSignal;
 }
 
 export interface InstallOutcome {
@@ -460,7 +515,12 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
     // Fail fast on an unusable destination before spending a download.
     inspectDestination(dest, entry);
 
-    const buffer = await downloadArchive(entry, opts.fetch);
+    const buffer = await downloadArchive(entry, opts.fetch, {
+        signal: opts.signal,
+        onProgress: opts.onProgress
+            ? (received, total) => opts.onProgress!({ id: entry.id, name: entry.name, phase: 'download', receivedBytes: received, totalBytes: total })
+            : undefined,
+    });
     const verified = verifyArchive(buffer, entry, opts.limits);
 
     // literal directory name under the trusted plugins root
@@ -619,6 +679,17 @@ export interface BatchOptions extends InstallerOptions {
     restartAfterRollback?: () => Promise<void>;
 }
 
+const CANCELLED_MESSAGE = 'Not installed — the batch was cancelled.';
+
+/** Emit a progress tick without letting a faulty listener break the batch. */
+function emit(opts: BatchOptions, progress: InstallProgress): void {
+    try {
+        opts.onProgress?.(progress);
+    } catch (e) {
+        console.warn('[plugin-installer] progress listener failed', e);
+    }
+}
+
 /**
  * Install several catalog plugins. Each entry is installed independently —
  * one failure never affects the others — and the backend is restarted once
@@ -652,6 +723,15 @@ export async function installCatalogBatch(ids: string[], catalog: Catalog, opts:
             results.push({ id, name: id, success: false, message: 'That plugin is not available in the catalog.' });
             continue;
         }
+        // Cancellation is honoured between items too, so a cancel during plugin
+        // 3 of 8 does not silently continue through the remaining downloads.
+        // Whatever already landed is still activated below, so the app is left
+        // in a consistent state and the rest can be resumed later.
+        if (opts.signal?.aborted) {
+            results.push({ id, name: entry.name, success: false, message: CANCELLED_MESSAGE });
+            emit(opts, { id, name: entry.name, phase: 'cancelled' });
+            continue;
+        }
         const missing = entry.dependencies.filter(dep => !installedNow.has(dep) && !opts.installedIds.has(dep));
         if (missing.length) {
             const names = missing.map(dep => catalog.byId.get(dep)?.name || dep).join(', ');
@@ -676,13 +756,19 @@ export async function installCatalogBatch(ids: string[], catalog: Catalog, opts:
             continue;
         }
         try {
+            emit(opts, { id, name: entry.name, phase: 'start', totalBytes: entry.size.downloadBytes });
             outcomes.push(await installCatalogEntry(entry, opts));
             installedNow.add(entry.id);
             results.push({ id, name: entry.name, success: true, message: `Installed ${entry.name} ${entry.version}.` });
+            emit(opts, { id, name: entry.name, phase: 'installed', receivedBytes: entry.size.downloadBytes, totalBytes: entry.size.downloadBytes });
         } catch (e) {
-            const message = e instanceof InstallError ? e.message : `${entry.name} could not be installed.`;
-            if (!(e instanceof InstallError)) console.error('[plugin-installer] unexpected install failure', e);
+            const cancelled = opts.signal?.aborted === true;
+            const message = cancelled
+                ? CANCELLED_MESSAGE
+                : e instanceof InstallError ? e.message : `${entry.name} could not be installed.`;
+            if (!cancelled && !(e instanceof InstallError)) console.error('[plugin-installer] unexpected install failure', e);
             results.push({ id, name: entry.name, success: false, message });
+            emit(opts, { id, name: entry.name, phase: cancelled ? 'cancelled' : 'failed' });
         }
     }
 

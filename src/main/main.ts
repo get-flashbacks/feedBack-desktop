@@ -123,6 +123,7 @@ import {
 import { initAudioBridge, shutdownAudio } from './audio-bridge';
 import { initDebugLogging, isDebugEnabled } from './debug-log';
 import { initPluginManager, isInstallBusy } from './plugin-manager';
+import { initPluginWizard } from './plugin-wizard';
 import { initSoundfontManager, getDesktopConfig, setDesktopConfig } from './soundfont-manager';
 import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
@@ -1249,6 +1250,12 @@ async function startup(): Promise<void> {
 
     // Create the main window
     createWindow(port);
+
+    // First-run guided plugin selection (issue #5). Registered after the main
+    // window exists so it can put the wizard on top of it once the app has
+    // painted; on later launches it only answers the Plugin Manager's
+    // "setup wizard" button.
+    initPluginWizard(() => mainWindow);
 
     // Detachable panes: the tray that lists them, and the OS behaviour applied to
     // each pane window as the renderer opens it (see did-create-window above).
