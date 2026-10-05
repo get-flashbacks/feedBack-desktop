@@ -123,6 +123,7 @@ import {
 import { initAudioBridge, shutdownAudio } from './audio-bridge';
 import { initDebugLogging, isDebugEnabled } from './debug-log';
 import { initPluginManager, isInstallBusy } from './plugin-manager';
+import { initPluginWizard } from './plugin-wizard';
 import { initSoundfontManager, getDesktopConfig, setDesktopConfig } from './soundfont-manager';
 import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
@@ -685,8 +686,8 @@ function createWindow(port: number): void {
     // origin. Anything else gets cancelled here and (via the
     // setWindowOpenHandler below) re-routed to the user's default browser
     // via shell.openExternal. (isRendererOrigin is derived once near the top
-    // of createWindow above and reused here — the permission handler keeps its
-    // own copy in a closure that isn't exposed.)
+    // of createWindow above and reused here — the permission handler and the
+    // first-run wizard each build their own copy in a closure.)
     // Block off-origin navigations at every layer Electron exposes:
     //
     // - `will-navigate`: user/script-initiated navigations on the main
@@ -1216,8 +1217,11 @@ async function startup(): Promise<void> {
     // Initialize audio engine (JUCE native addon).
     initAudioBridge();
 
-    // Initialize plugin manager IPC handlers
-    initPluginManager();
+    // Initialize plugin manager IPC handlers. The uninstall confirmation is a
+    // native dialog parented to the main window: the renderer bridge is reachable
+    // by plugin scripts, so a renderer-only confirm is not a sufficient gate for
+    // "delete this plugin's data".
+    initPluginManager(() => mainWindow);
 
     // Initialize soundfont manager IPC handlers (Audio Quality preference)
     initSoundfontManager(() => mainWindow);
@@ -1249,6 +1253,14 @@ async function startup(): Promise<void> {
 
     // Create the main window
     createWindow(port);
+
+    // First-run guided plugin selection (issue #5). Registered after the main
+    // window exists so it can put the wizard on top of it once the app has
+    // painted; on later launches it only answers the Plugin Manager's
+    // "setup wizard" button. It gets the same origin predicate the paint check
+    // above uses, so its own first-run trigger can never fire for a Chromium
+    // error page.
+    initPluginWizard({ getWindow: () => mainWindow, isRendererOrigin: makeRendererOriginPredicate(port) });
 
     // Detachable panes: the tray that lists them, and the OS behaviour applied to
     // each pane window as the renderer opens it (see did-create-window above).
