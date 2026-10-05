@@ -113,6 +113,65 @@ export function resolveUpdate(
 }
 
 /**
+ * Why the catalog's version may not be installed over the copy that is installed
+ * now, or null when it may. One rule for every path that performs that install —
+ * the per-plugin Update button and the catalog list's batch selection alike — so a
+ * pinned, disabled or ahead copy cannot be swapped by selecting it in the list
+ * instead. Going back is a downgrade, which only ever reinstalls a pin from the
+ * record's own history.
+ */
+export function installRefusal(entry: CatalogEntry, record: InstalledPluginRecord): string | null {
+    switch (updateStatusFor(record, entry)) {
+        case 'current':
+            return `${entry.name} is already up to date.`;
+        case 'pinned':
+            return `${entry.name} is pinned at ${record.version}. Unpin it to install ${entry.version}.`;
+        case 'disabled':
+            return `${entry.name} is disabled. Enable it to install ${entry.version}.`;
+        case 'ahead':
+            return `The catalog's ${entry.name} (${entry.version}) is older than what is installed (${record.version}). `
+                + 'Use "Downgrade" to go back.';
+        default:
+            return null;
+    }
+}
+
+/** One request the batch will not make, shaped like a batch result. */
+export interface RefusedInstall {
+    id: string;
+    name: string;
+    success: false;
+    message: string;
+}
+
+/**
+ * Split a requested selection into what a batch may install and what each
+ * plugin's own recorded state forbids. The refusals come back as batch-shaped
+ * results, so the screen reports them per plugin instead of losing them, and
+ * every refusal is the same one the per-plugin operation would give.
+ */
+export function splitLifecycleRequests(
+    ids: Iterable<string>,
+    records: ReadonlyMap<string, InstalledPluginRecord>,
+    entries: Iterable<CatalogEntry>,
+): { allowed: string[]; refused: RefusedInstall[] } {
+    const byId = new Map<string, CatalogEntry>();
+    for (const entry of entries) byId.set(entry.id, entry);
+    const allowed: string[] = [];
+    const refused: RefusedInstall[] = [];
+    for (const id of ids) {
+        const entry = byId.get(id);
+        // No record means the copy was not installed here, so there is no installed
+        // version for this install to go over.
+        const record = entry ? records.get(entry.id) : undefined;
+        const message = entry && record ? installRefusal(entry, record) : null;
+        if (message) refused.push({ id, name: entry?.name ?? id, success: false, message });
+        else allowed.push(id);
+    }
+    return { allowed, refused };
+}
+
+/**
  * Ids of installed plugins an update check offers to update. Pinned and disabled
  * plugins are not in it: a pin is the user saying "leave this version alone",
  * and a disabled plugin is not loaded, so neither has an update to offer.

@@ -181,7 +181,9 @@
                 // A pinned or disabled plugin is installed too, and main refuses to
                 // install another version over either: the row offers Pin/Unpin or
                 // Enable instead, so the checkbox is off rather than a dead end.
-                const held = !!entry.pinned || !!entry.disabled;
+                // A copy the catalog is behind is refused the same way — that
+                // install is a downgrade, and the row offers Downgrade instead.
+                const held = !!entry.pinned || !!entry.disabled || entry.updateStatus === 'ahead';
                 box.disabled = !installable || entry.bundled || selection.tier === 'essential' || held;
                 if (box.disabled) catalogSelection.delete(entry.id);
                 box.checked = catalogSelection.has(entry.id);

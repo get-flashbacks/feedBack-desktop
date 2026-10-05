@@ -422,11 +422,11 @@ function rmdirIfEmpty(dir: string): void {
     try { fs.rmdirSync(dir); } catch { /* not empty or already gone */ }
 }
 
-/**
- * Create `dir` if missing and require it to be a real directory. A symlink
- * (or file) squatting on an installer-owned directory would otherwise
- * redirect renames outside the plugins root.
- */
+/** The refusal for an installer-owned directory the installer will not touch. */
+function unusableRoot(where: string): InstallError {
+    return new InstallError(`The ${where} is not usable. Remove it and retry.`);
+}
+
 /**
  * Prepare one of the installer's own directories, refusing anything that is not
  * a real directory: a symlink there would redirect a rename outside the plugins
@@ -440,7 +440,17 @@ function ensureRealDirectory(dir: string, where: string): void {
     } catch (e) {
         console.error('[plugin-installer] could not prepare installer directory', e);
     }
-    throw new InstallError(`The ${where} is not usable. Remove it and retry.`);
+    throw unusableRoot(where);
+}
+
+/**
+ * The same refusal without creating anything, for a path about to be read or
+ * removed rather than written: a root that is not there has nothing under it,
+ * while a root that is a symlink or a file would send the operation outside the
+ * plugins root — `rename` and `rmSync` both resolve every component but the last.
+ */
+function requireRealRoot(dir: string, where: string): void {
+    if (fs.existsSync(dir) && !isRealDirectory(dir)) throw unusableRoot(where);
 }
 
 function rmQuiet(target: string): void {
@@ -576,6 +586,26 @@ function sourcePathsFor(pluginsDir: string, installDir: string): { live: string;
     return { live, disabled: disabledPathFor(root, installDir), backup: backupPathFor(root, installDir) };
 }
 
+/** The installer's own directory a parked copy lives in. */
+function disabledRootFor(pluginsDir: string): string {
+    // literal directory name under the trusted plugins root
+    return path.join(path.resolve(pluginsDir), DISABLED_DIR);
+}
+
+/**
+ * The message a failed move reports. A cross-device rename is not a lock: the two
+ * locations are on different volumes, or the filesystem does not support
+ * renaming a directory at all, so retrying cannot succeed. Naming that is the
+ * only honest answer, rather than telling the user to close an app that is
+ * holding nothing.
+ */
+function moveFailure(e: any, verb: 'disabled' | 'enabled'): InstallError {
+    if (e?.code === 'EXDEV') {
+        return new InstallError(`This plugin could not be ${verb}: the plugins folder and its ${DISABLED_DIR} location are on different volumes.`);
+    }
+    return new InstallError(`This plugin is in use and could not be ${verb}. Close other apps using it and retry.`);
+}
+
 /**
  * Disable a copy: move it out of the backend's scan into the disabled slot. Its
  * files, and anything the backend already wrote for it, are left alone, so
@@ -615,14 +645,12 @@ export async function disablePlugin(pluginsDir: string, installDir: string): Pro
         throw new InstallError('This plugin is linked to a development checkout, so it cannot be disabled. Unlink it first.');
     }
     if (!stat.isDirectory()) throw new InstallError('The install location for this plugin is occupied by a file.');
-    // literal directory name under the trusted plugins root
-    const disabledRoot = path.join(path.resolve(pluginsDir), DISABLED_DIR);
-    ensureRealDirectory(disabledRoot, `disabled-plugins location (${DISABLED_DIR})`);
+    ensureRealDirectory(disabledRootFor(pluginsDir), `disabled-plugins location (${DISABLED_DIR})`);
     try {
         await renameWithRetry(live, disabled);
     } catch (e) {
         console.error('[plugin-installer] could not disable plugin', e);
-        throw new InstallError('This plugin is in use and could not be disabled. Close other apps using it and retry.');
+        throw moveFailure(e, 'disabled');
     }
     rmQuiet(backup);
 }
@@ -651,14 +679,18 @@ export async function enablePlugin(pluginsDir: string, installDir: string): Prom
     if (fs.existsSync(live)) {
         throw new InstallError('A copy of this plugin is already installed. Remove it before enabling this one.');
     }
+    // The lstat above only inspected the slot itself: it resolved the disabled root
+    // as an ordinary parent, so a symlinked root would pass and hand the rename a
+    // directory from outside the plugins root. Disabling checks this; enabling
+    // moves into the live, backend-scanned slot, so it has to as well.
+    ensureRealDirectory(disabledRootFor(pluginsDir), `disabled-plugins location (${DISABLED_DIR})`);
     try {
         await renameWithRetry(disabled, live);
     } catch (e) {
         console.error('[plugin-installer] could not enable plugin', e);
-        throw new InstallError('This plugin is in use and could not be enabled. Close other apps using it and retry.');
+        throw moveFailure(e, 'enabled');
     }
-    // literal directory name under the trusted plugins root
-    rmdirIfEmpty(path.join(path.resolve(pluginsDir), DISABLED_DIR));
+    rmdirIfEmpty(disabledRootFor(pluginsDir));
 }
 
 /** What a removal actually deleted, so the caller can say so honestly. */
@@ -675,6 +707,13 @@ export interface RemovedSource {
  */
 export function removePluginSource(pluginsDir: string, installDir: string): RemovedSource {
     const { live, disabled, backup } = sourcePathsFor(pluginsDir, installDir);
+    // The recursive removes below resolve every path component but the last, so a
+    // disabled or backup root that is a symlink would delete whatever it points at
+    // instead. Both roots are the installer's own, and a copy is removed in full
+    // or not at all — half an uninstall is the state neither the record nor the
+    // screen can describe.
+    requireRealRoot(disabledRootFor(pluginsDir), `disabled-plugins location (${DISABLED_DIR})`);
+    requireRealRoot(path.dirname(backup), `backup location (${BACKUP_DIR})`);
     const removed: RemovedSource = {
         live: fs.existsSync(live),
         disabled: fs.existsSync(disabled),
@@ -686,7 +725,7 @@ export function removePluginSource(pluginsDir: string, installDir: string): Remo
     rmQuiet(live);
     rmQuiet(disabled);
     rmQuiet(backup);
-    rmdirIfEmpty(path.join(path.resolve(pluginsDir), DISABLED_DIR));
+    rmdirIfEmpty(disabledRootFor(pluginsDir));
     return removed;
 }
 
