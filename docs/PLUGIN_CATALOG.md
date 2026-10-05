@@ -56,6 +56,10 @@ renderer reaches it through `window.feedBackDesktop.plugins`:
   `canRollback` for each.
 - `installCatalog(ids)` — install a batch by catalog id.
 - `rollbackCatalog(id)` — restore the version kept in the backup slot.
+- `onInstallProgress(cb)` — progress ticks of the in-flight batch, broadcast to
+  every window, so the setup wizard and this screen can drive the same bar.
+- `cancelCatalogInstall()` — abort the running batch. Whatever already landed is
+  still activated; the rest is simply not installed and can be re-selected.
 
 The renderer passes ids only. The main process looks each id up in the
 bundled catalog and builds the one URL it will download:
@@ -200,3 +204,56 @@ Behaviour that later lifecycle features depend on:
   plugins that are gone, and its writers must be serialized — a write re-reads the
   record to check the schema and then replaces it wholesale, so two concurrent
   read-modify-write callers would drop each other's entries.
+
+## First-run guided selection
+
+A fresh install does not need every optional plugin, so the first launch offers
+a wizard (`src/main/wizard.html` + `wizard.js`, driven by
+`src/main/plugin-wizard.ts`): pick instruments and features, review the resolved
+selection, download it in one batch with progress and cancellation. Skipping
+leaves the fully working app behind, the wizard can be reopened from the Plugin
+Manager ("Setup wizard"), and an interrupted run resumes without reinstalling
+what already completed.
+
+The wizard window loads a dedicated minimal bridge (`wizard-preload.ts`, in the
+shape of `splash-preload.ts`), not the full desktop preload: it can read catalog
+state and drive the batch it started, and nothing else — no audio engine, no
+destructive maintenance actions.
+
+The decisions are pure functions in `src/main/plugin-selection.ts`, and they are
+**data-driven from the catalog** — no per-plugin UI rules:
+
+| Catalog field | Effect |
+| --- | --- |
+| `instruments` | Becomes an instrument question; a chosen instrument recommends every entry tagged with it, and entries with no tags (instrument-agnostic) once anything is chosen. |
+| `category` | Becomes a feature question; a chosen category recommends that category's entries. |
+| `selection.tier` | `essential` is never a choice (always selected, and always part of the install set); `hidden` is never offered or recommended and only arrives as somebody else's dependency; `recommended`/`optional` are ordinary choices. |
+| `selection.defaultSelected` | Recommended even with no answers given. |
+| `dependencies` | Pulled in automatically, locked in the review list, ordered before their dependents. |
+| `conflicts` | Pruned deterministically: auto-added dependencies win over `essential` entries, which win over plain preferences. A dropped dependency drops its dependents too. |
+
+So adding an entry — or a new instrument or category — changes what the wizard
+offers with no code change. Question labels are derived from the tag itself
+(`import_export` → "Import Export").
+
+Onboarding state lives in the desktop configuration
+(`<userData>/slopsmith-desktop.json`, `pluginSetup`): `completed` records that
+the wizard was finished *or* skipped, and `pendingIds` records a selection an
+interrupted run still owes so reopening resumes exactly those entries.
+
+What those two fields *mean* is pure logic in `src/main/plugin-setup-state.ts`,
+including the rule that decides whether a wizard window close counts as the user
+skipping: a close the user made themselves is a decision (and the only escape
+from a resume whose batch keeps failing), while a close the app caused — a quit,
+or the renderer startup giving up — leaves the state untouched so a launch that
+never worked cannot consume onboarding. The first-run trigger is gated on the
+renderer origin, so it opens over the app rather than over one of Chromium's
+error pages.
+
+Both install entry points go through one resolver in `plugin-manager.ts`
+(`planCatalogInstall`), so a catalog entry that declares a dependency installs
+from the wizard *and* from the Plugin Manager instead of failing with
+"X requires Y" on one of them.
+
+No account is required (public catalog only) and no analytics or telemetry is
+collected or introduced by onboarding.

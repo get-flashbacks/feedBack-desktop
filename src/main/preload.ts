@@ -39,7 +39,17 @@ import {
     IPC_MAINTENANCE_RESTART,
     IPC_PANE_SYNC,
     IPC_PANE_EVENT_TOGGLE,
+    IPC_PLUGIN_CATALOG_PROGRESS,
+    IPC_PLUGIN_CATALOG_CANCEL,
+    IPC_PLUGIN_WIZARD_OPEN,
+    IPC_PLUGIN_WIZARD_GET_STATE,
+    IPC_PLUGIN_WIZARD_PREVIEW,
+    IPC_PLUGIN_WIZARD_RESOLVE,
+    IPC_PLUGIN_WIZARD_INSTALL,
+    IPC_PLUGIN_WIZARD_FINISH,
 } from './ipc-channels';
+// Type-only: the preload bundle must not pull the installer's runtime deps.
+import type { InstallProgress as PluginInstallProgress } from './plugin-installer';
 
 // Auto-update channel + event payloads. Kept here (rather than re-exported
 // from update-manager.ts) so the preload bundle doesn't drag in the Velopack
@@ -505,6 +515,26 @@ const feedBackDesktopApi = {
         catalog: () => ipcRenderer.invoke('plugins:catalog'),
         installCatalog: (ids: string[]) => ipcRenderer.invoke('plugins:installCatalog', ids),
         rollbackCatalog: (id: string) => ipcRenderer.invoke('plugins:rollbackCatalog', id),
+        // Progress of the in-flight catalog batch (broadcast to every window),
+        // and the shared cancel for it.
+        cancelCatalogInstall: () => ipcRenderer.invoke(IPC_PLUGIN_CATALOG_CANCEL),
+        onInstallProgress: (callback: (progress: PluginInstallProgress) => void) => {
+            const listener = (_event: unknown, progress: PluginInstallProgress) => callback(progress);
+            ipcRenderer.on(IPC_PLUGIN_CATALOG_PROGRESS, listener);
+            return () => ipcRenderer.removeListener(IPC_PLUGIN_CATALOG_PROGRESS, listener);
+        },
+    },
+
+    // First-run guided plugin selection (issue #5). Own window (wizard.html);
+    // the Plugin Manager's "setup wizard" button calls open() to bring it back.
+    pluginWizard: {
+        open: () => ipcRenderer.invoke(IPC_PLUGIN_WIZARD_OPEN),
+        getState: () => ipcRenderer.invoke(IPC_PLUGIN_WIZARD_GET_STATE),
+        preview: (answers: { instruments: string[]; categories: string[] }) =>
+            ipcRenderer.invoke(IPC_PLUGIN_WIZARD_PREVIEW, answers),
+        resolve: (ids: string[]) => ipcRenderer.invoke(IPC_PLUGIN_WIZARD_RESOLVE, ids),
+        install: (ids: string[]) => ipcRenderer.invoke(IPC_PLUGIN_WIZARD_INSTALL, ids),
+        finish: (payload: { skipped: boolean }) => ipcRenderer.invoke(IPC_PLUGIN_WIZARD_FINISH, payload),
     },
 
     // Soundfont (Audio Quality preference for GP5 → audio rendering)
