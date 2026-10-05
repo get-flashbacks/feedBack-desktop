@@ -9,17 +9,17 @@
 // The wizard is its own local window (src/main/wizard.html + wizard.js) rather
 // than a renderer screen because it has to appear before the user has navigated
 // anywhere in the app — and because "skip" must leave a fully working app. It
-// reuses the ordinary preload bridge, so it can talk to the same Plugin Manager
-// catalog/install surface the rest of the app uses.
+// talks to the same Plugin Manager catalog/install surface the rest of the app
+// uses, but through its own minimal bridge (wizard-preload.ts).
 //
 // State lives in the desktop config (see soundfont-manager.ts): `completed`
 // keeps the wizard from reappearing, `pendingIds` is what an interrupted run
-// still owes so reopening resumes instead of starting over.
-//
-// Selecting and resolving is pure logic in plugin-selection.ts — this module
-// only supplies catalog state, persists progress and drives the window.
+// still owes so reopening resumes instead of starting over. What each of those
+// transitions means is pure logic in plugin-setup-state.ts, selecting and
+// resolving is pure logic in plugin-selection.ts — this module only supplies
+// catalog state, persists progress and drives the window.
 
-import { BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -30,7 +30,7 @@ import {
     IPC_PLUGIN_WIZARD_PREVIEW,
     IPC_PLUGIN_WIZARD_RESOLVE,
 } from './ipc-channels';
-import { installFromCatalog, isInstallBusy, listCatalog } from './plugin-manager';
+import { catalogSelectionEntries, installFromCatalog, isInstallBusy, planCatalogInstall } from './plugin-manager';
 import {
     SelectionEntry,
     WizardAnswers,
@@ -39,29 +39,15 @@ import {
     previewSelection,
     recommendIds,
     resolveSelection,
-    selectableEntries,
-    toSelectionEntries,
 } from './plugin-selection';
+import { SetupState, isOnboardingNeeded, readSetupState, shouldAutoOpenWizard, stateAfterClose } from './plugin-setup-state';
 import { getDesktopConfig, setDesktopConfig } from './soundfont-manager';
 
 // ── Persisted onboarding state ────────────────────────────────────────────
 
-interface SetupState {
-    completed: boolean;
-    pendingIds: string[];
-}
-
-function readSetupState(): SetupState {
-    const cfg = getDesktopConfig().pluginSetup ?? {};
-    return {
-        completed: cfg.completed === true,
-        pendingIds: Array.isArray(cfg.pendingIds) ? cfg.pendingIds.filter(id => typeof id === 'string') : [],
-    };
-}
-
-/** First run is "the wizard has never been finished or explicitly skipped". */
-export function isOnboardingNeeded(): boolean {
-    return !readSetupState().completed;
+/** The transitions themselves are pure and live in plugin-setup-state.ts. */
+function readSetup(): SetupState {
+    return readSetupState(getDesktopConfig().pluginSetup);
 }
 
 function markCompleted(pendingIds: string[] = []): void {
@@ -82,21 +68,7 @@ function markPending(ids: string[]): void {
     setDesktopConfig({ pluginSetup: { ...cfg, completed: false, pendingIds: ids } });
 }
 
-// ── Catalog view ──────────────────────────────────────────────────────────
-
-/**
- * The catalog as the wizard sees it: metadata plus live install state. A
- * missing or damaged catalog yields an empty list — "nothing to offer", never
- * a failed launch.
- */
-function selectionEntries(): SelectionEntry[] {
-    try {
-        return toSelectionEntries(listCatalog());
-    } catch (e) {
-        console.error('[plugin-wizard] catalog unavailable', e);
-        return [];
-    }
-}
+// ── Wizard state ──────────────────────────────────────────────────────────
 
 export interface WizardState {
     /** True while the wizard has never been finished or skipped. */
@@ -114,8 +86,8 @@ export interface WizardState {
 }
 
 function wizardState(): WizardState {
-    const entries = selectionEntries();
-    const setup = readSetupState();
+    const entries = catalogSelectionEntries();
+    const setup = readSetup();
     const answers: WizardAnswers = { instruments: [], categories: [] };
     return {
         firstRun: !setup.completed,
@@ -130,39 +102,13 @@ function wizardState(): WizardState {
 
 // ── Install ───────────────────────────────────────────────────────────────
 
-/** Ids that still need work: everything not already installed at its pinned version. */
-function outstandingIds(entries: SelectionEntry[], ids: string[]): string[] {
-    return ids.filter(id => {
-        const entry = entries.find(e => e.id === id);
-        if (!entry) return false;
-        // A bundled core plugin ships with the app; the installer refuses to
-        // place a second copy over it, so it is never "outstanding".
-        if (entry.bundled) return false;
-        return entry.installedVersion !== entry.version;
-    });
-}
-
-/**
- * Re-resolve a renderer-supplied selection in main before acting on it: the
- * wizard never gets to name a plugin outside the catalog, bypass a dependency,
- * or force a conflicting pair through.
- */
-function planFor(ids: unknown): { entries: SelectionEntry[]; ids: string[] } {
-    const entries = selectionEntries();
-    const requested = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
-    const plan = resolveSelection(entries, requested);
-    // Locked (essential) entries are part of the app, not a choice: keep them
-    // in the set regardless of what the UI sent.
-    const locked = selectableEntries(entries).filter(e => e.tier === 'essential').map(e => e.id);
-    const resolved = resolveSelection(entries, [...locked, ...plan.ids]);
-    return { entries, ids: resolved.ids };
-}
-
 async function runInstall(ids: unknown): Promise<{ success: boolean; message: string; results: unknown[] }> {
-    const { entries, ids: resolved } = planFor(ids);
+    // Re-resolved in main, the same way the Plugin Manager resolves its own
+    // selection: the wizard never gets to name a plugin outside the catalog,
+    // bypass a dependency, or force a conflicting pair through.
+    const { ids: resolved, outstanding: todo } = planCatalogInstall(ids);
     // Resume path: a plugin already on disk at its pinned version is skipped,
     // so re-running an interrupted setup never reinstalls finished work.
-    const todo = outstandingIds(entries, resolved);
     if (resolved.length > 0 && todo.length === 0) {
         markCompleted([]);
         return { success: true, message: 'Everything in this selection is already installed.', results: [] };
@@ -194,6 +140,10 @@ async function runInstall(ids: unknown): Promise<{ success: boolean; message: st
 let wizardWindow: BrowserWindow | null = null;
 let getMainWindow: () => BrowserWindow | null = () => null;
 let installRunning = false;
+// Set once the app is on its way out — a quit, or the renderer startup giving up
+// (failRendererStartup calls app.quit()). Either way the wizard window goes with
+// it, so its `closed` handler must not read the close as a decision.
+let goingAway = false;
 
 /**
  * Bring up the wizard window, focusing the existing one if it is already open.
@@ -245,13 +195,12 @@ export function openWizardWindow(): boolean {
     });
     wizardWindow.on('closed', () => {
         wizardWindow = null;
-        // Closing without finishing is the skip path: stop asking on every
-        // launch. An interrupted run keeps `pendingIds`, so it stays unfinished
-        // and the next launch resumes instead.
-        if (!installRunning) {
-            const setup = readSetupState();
-            if (setup.pendingIds.length === 0 && !setup.completed) markCompleted([]);
-        }
+        // A close the user made themselves is the skip path: stop asking on
+        // every launch. It is also the only escape from a resume whose batch
+        // keeps failing, so `pendingIds` must not survive to re-prompt forever.
+        // A close the app caused is not a decision — see `goingAway`.
+        const next = stateAfterClose(readSetup(), { installRunning, goingAway });
+        if (next) markCompleted(next.pendingIds);
     });
     wizardWindow.loadFile(page).catch((e: unknown) => {
         console.error('[plugin-wizard] could not load the wizard page', e);
@@ -265,7 +214,18 @@ export function closeWizardWindow(): void {
 
 // ── IPC ───────────────────────────────────────────────────────────────────
 
-export function initPluginWizard(getWindow: () => BrowserWindow | null): void {
+export interface PluginWizardDeps {
+    getWindow: () => BrowserWindow | null;
+    /**
+     * "Is this URL exactly the renderer origin?" — the predicate createWindow
+     * uses for its own paint check, handed over rather than reimplemented so the
+     * two can never drift apart.
+     */
+    isRendererOrigin: (url: string) => boolean;
+}
+
+export function initPluginWizard(deps: PluginWizardDeps): void {
+    const { getWindow, isRendererOrigin } = deps;
     getMainWindow = getWindow;
 
     ipcMain.handle(IPC_PLUGIN_WIZARD_OPEN, () => ({ success: openWizardWindow() }));
@@ -273,13 +233,13 @@ export function initPluginWizard(getWindow: () => BrowserWindow | null): void {
     ipcMain.handle(IPC_PLUGIN_WIZARD_GET_STATE, () => wizardState());
 
     ipcMain.handle(IPC_PLUGIN_WIZARD_PREVIEW, (_event, answers: unknown) => {
-        const entries = selectionEntries();
+        const entries = catalogSelectionEntries();
         const preview = previewSelection(entries, answers);
         return { recommended: preview.recommended, plan: preview.plan };
     });
 
     ipcMain.handle(IPC_PLUGIN_WIZARD_RESOLVE, (_event, ids: unknown) => {
-        const entries = selectionEntries();
+        const entries = catalogSelectionEntries();
         return { plan: resolveSelection(entries, Array.isArray(ids) ? ids : []) };
     });
 
@@ -307,10 +267,21 @@ export function initPluginWizard(getWindow: () => BrowserWindow | null): void {
 
     // First run: wait for the app window to paint before putting the wizard on
     // top of it, so the two never fight over focus during startup.
+    app.on('before-quit', () => { goingAway = true; });
     const main = getWindow();
     if (main && !main.isDestroyed()) {
-        main.webContents.once('did-finish-load', () => {
-            if (!isOnboardingNeeded()) return;
+        // Closing the main window takes the (parented) wizard with it, and the
+        // app only turns that into a quit afterwards — so `close` is the signal
+        // here, not `before-quit`.
+        main.on('close', () => { goingAway = true; });
+        // `.on` plus the origin gate, exactly like the sibling handler in
+        // createWindow: Chromium fires did-finish-load for its built-in error
+        // pages too, and main.ts re-issues loadURL on every did-fail-load retry,
+        // so the event that lands first may be an error page committing with the
+        // real paint still a retry away.
+        main.webContents.on('did-finish-load', () => {
+            const url = main.webContents.getURL() || '';
+            if (!shouldAutoOpenWizard(url, { isRendererOrigin, onboardingNeeded: isOnboardingNeeded(readSetup()) })) return;
             try {
                 openWizardWindow();
             } catch (e) {

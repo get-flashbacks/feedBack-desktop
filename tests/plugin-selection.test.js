@@ -181,6 +181,22 @@ test('a dependency the user also picked is not reported as auto-added', () => {
     assert.deepStrictEqual(plan.required, {});
 });
 
+test('the plan size counts only what the batch will actually fetch', () => {
+    const parsed = entries([
+        row('already', { installedVersion: '1.0.0' }),
+        row('bundled', { bundled: true }),
+        row('fresh', { downloadBytes: 700 }),
+        // A different installed version is an upgrade, not a reinstall.
+        row('outdated', { version: '2.0.0', installedVersion: '1.0.0', downloadBytes: 500 }),
+    ]);
+    const plan = selection.resolveSelection(parsed, ['already', 'bundled', 'fresh', 'outdated']);
+    // Everything is still in the plan — the two skipped entries are just not
+    // part of the transfer, so counting them would strand the wizard's progress
+    // bar short of 100% for the whole run.
+    assert.deepStrictEqual(plan.ids, ['already', 'bundled', 'fresh', 'outdated']);
+    assert.strictEqual(plan.downloadBytes, 1200);
+});
+
 test('unknown and duplicate ids are ignored', () => {
     const plan = selection.resolveSelection(entries([row('a')]), ['a', 'a', 'nope', 42, null]);
     assert.deepStrictEqual(plan.ids, ['a']);

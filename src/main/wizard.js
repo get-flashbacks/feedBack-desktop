@@ -76,6 +76,15 @@
         return entriesById.get(id);
     }
 
+    // What main will actually fetch. An entry already at its pinned version, or
+    // bundled with the app, is in the plan but never downloaded, so its bytes
+    // must stay out of both the size shown on review and the progress
+    // denominator — otherwise the bar can never reach 100%. This mirrors
+    // plugin-selection.ts's plan.downloadBytes.
+    function needsDownload(entry) {
+        return !!entry && !entry.bundled && entry.installedVersion !== entry.version;
+    }
+
     function tag(text, className) {
         const span = document.createElement('span');
         span.className = 'tag' + (className ? ' ' + className : '');
@@ -256,7 +265,7 @@
             const row = progress.get(id);
             const status = row || {};
             if (status.total) { received += status.received; total += status.total; }
-            else if (entry) { total += entry.downloadBytes; }
+            else if (needsDownload(entry)) { total += entry.downloadBytes; }
             if (!row && entry && entry.installedVersion === entry.version) continue;
             const div = document.createElement('div');
             div.className = 'row';
@@ -302,8 +311,17 @@
         const results = Array.isArray(result.results) ? result.results : [];
         const failed = results.filter(r => !r.success);
 
-        $('progress-bar').value = 100;
-        $('done-title').textContent = failed.length ? 'Setup finished with problems' : 'All set';
+        // An empty result set means the batch never ran — main declined it
+        // because another installation held the lock — so the refusal message
+        // below must not be announced as a finished setup.
+        let title = 'All set';
+        if (failed.length) title = 'Setup finished with problems';
+        else if (results.length === 0 && result.success === false) title = 'Nothing was installed';
+        // A run that was not refused walks the bar to 100% on its own now that
+        // the denominator matches the transfer; a refused or cancelled one must
+        // not be painted as a complete one.
+        if (result.success !== false) $('progress-bar').value = 100;
+        $('done-title').textContent = title;
         $('done-line').textContent = result.message || '';
         const doneList = $('done-list');
         doneList.innerHTML = '';

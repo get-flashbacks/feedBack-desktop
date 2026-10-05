@@ -31,6 +31,12 @@ import {
     rollbackInstall,
 } from './plugin-installer';
 import { IPC_PLUGIN_CATALOG_CANCEL, IPC_PLUGIN_CATALOG_PROGRESS } from './ipc-channels';
+import {
+    SelectionEntry,
+    resolveSelection,
+    selectableEntries,
+    toSelectionEntries,
+} from './plugin-selection';
 
 // Run git with an explicit argv array — never via a shell. This removes the
 // OS command-injection vector that `exec(`git clone ${gitUrl} ...`)` had:
@@ -493,6 +499,60 @@ export function listCatalog(): unknown[] {
     }));
 }
 
+/**
+ * The catalog as the selection layer sees it: metadata plus live install state.
+ * A missing or damaged catalog yields an empty list — "nothing to offer", never
+ * a failed launch.
+ */
+export function catalogSelectionEntries(): SelectionEntry[] {
+    try {
+        return toSelectionEntries(listCatalog());
+    } catch (e) {
+        console.error('[plugins] catalog unavailable', e);
+        return [];
+    }
+}
+
+/** Ids that still need work: everything not already installed at its pinned version. */
+function outstandingIds(entries: SelectionEntry[], ids: string[]): string[] {
+    return ids.filter(id => {
+        const entry = entries.find(e => e.id === id);
+        if (!entry) return false;
+        // A bundled core plugin ships with the app; the installer refuses to
+        // place a second copy over it, so it is never "outstanding".
+        if (entry.bundled) return false;
+        return entry.installedVersion !== entry.version;
+    });
+}
+
+export interface CatalogInstallPlan {
+    /** The resolved set, dependencies first: what the caller shows the user. */
+    ids: string[];
+    /** The part of it the batch will actually download. */
+    outstanding: string[];
+}
+
+/**
+ * Resolve a caller-supplied selection before anything is installed: the
+ * dependency closure and conflict pruning of plugin-selection.ts, with locked
+ * (essential) entries kept in the set, then everything already installed at its
+ * pinned version — or bundled with the app — dropped, because the batch skips
+ * those anyway.
+ *
+ * The renderer never gets to name a plugin outside the catalog, bypass a
+ * dependency or force a conflicting pair through, whichever screen it came from:
+ * the batch installer only orders dependencies that are themselves in the
+ * selection, so an unresolved id would come back as "X requires Y".
+ */
+export function planCatalogInstall(rawIds: unknown): CatalogInstallPlan {
+    const entries = catalogSelectionEntries();
+    const requested = Array.isArray(rawIds) ? rawIds.filter((id): id is string => typeof id === 'string') : [];
+    const plan = resolveSelection(entries, requested);
+    const locked = selectableEntries(entries).filter(e => e.tier === 'essential').map(e => e.id);
+    const resolved = resolveSelection(entries, [...locked, ...plan.ids]);
+    return { ids: resolved.ids, outstanding: outstandingIds(entries, resolved.ids) };
+}
+
 async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; message: string }> {
     let entry;
     try {
@@ -525,7 +585,10 @@ export function initPluginManager(): void {
     ipcMain.handle('plugins:catalog', () => listCatalog());
 
     ipcMain.handle('plugins:installCatalog', async (_event, ids: unknown) => {
-        return await installFromCatalog(ids);
+        // Resolved in main, like the wizard's own install: dependencies and
+        // conflicts are settled against the bundled catalog rather than left for
+        // the batch installer to refuse.
+        return await installFromCatalog(planCatalogInstall(ids).outstanding);
     });
 
     ipcMain.handle(IPC_PLUGIN_CATALOG_CANCEL, () => cancelCatalogInstall());

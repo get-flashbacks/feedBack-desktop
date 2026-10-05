@@ -199,11 +199,16 @@ export interface SelectionPlan {
     ids: string[];
     /** Dependency ids pulled in automatically, keyed by the entry that needs them. */
     required: Record<string, string[]>;
-    /** Entries the user picked explicitly (may include auto-added dependencies). */
+    /** Entries the caller named explicitly, minus any dropped by the conflict pass. */
     optional: string[];
     /** Entries dropped because they conflicted, or because their dependency was dropped. */
     conflicts: Array<{ kept: string | null; dropped: string }>;
-    /** Total pinned download size of the resolved set. */
+    /**
+     * Pinned download size of the resolved set, minus what is never fetched: an
+     * entry already on disk at its pinned version, or bundled with the app, is
+     * in the plan but not in the transfer, and counting it would leave a
+     * progress bar short of 100% for the whole run.
+     */
     downloadBytes: number;
 }
 
@@ -308,7 +313,12 @@ export function resolveSelection(entries: SelectionEntry[], ids: string[]): Sele
         required: requiredKept,
         optional: wanted.filter(id => !dropped.has(id)),
         conflicts,
-        downloadBytes: kept.reduce((sum, id) => sum + byId.get(id)!.downloadBytes, 0),
+        // Only what the batch will actually fetch: see downloadBytes above.
+        downloadBytes: kept.reduce((sum, id) => {
+            const entry = byId.get(id)!;
+            if (entry.bundled || entry.installedVersion === entry.version) return sum;
+            return sum + entry.downloadBytes;
+        }, 0),
     };
 }
 

@@ -188,5 +188,19 @@ Onboarding state lives in the desktop configuration
 the wizard was finished *or* skipped, and `pendingIds` records a selection an
 interrupted run still owes so reopening resumes exactly those entries.
 
+What those two fields *mean* is pure logic in `src/main/plugin-setup-state.ts`,
+including the rule that decides whether a wizard window close counts as the user
+skipping: a close the user made themselves is a decision (and the only escape
+from a resume whose batch keeps failing), while a close the app caused — a quit,
+or the renderer startup giving up — leaves the state untouched so a launch that
+never worked cannot consume onboarding. The first-run trigger is gated on the
+renderer origin, so it opens over the app rather than over one of Chromium's
+error pages.
+
+Both install entry points go through one resolver in `plugin-manager.ts`
+(`planCatalogInstall`), so a catalog entry that declares a dependency installs
+from the wizard *and* from the Plugin Manager instead of failing with
+"X requires Y" on one of them.
+
 No account is required (public catalog only) and no analytics or telemetry is
 collected or introduced by onboarding.
