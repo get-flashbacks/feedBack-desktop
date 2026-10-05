@@ -612,8 +612,7 @@ export async function installFromCatalog(
 // what loadCatalog throws on — a missing, unparseable or wrong-version file.
 // Entries the loader rejects individually are still dropped silently by design,
 // so a catalog whose every entry fails the runtime gate still answers ok.
-function listCatalog(): { ok: boolean; entries: unknown[]; message?: string } {
-export function listCatalog(): unknown[] {
+export function listCatalog(): { ok: boolean; entries: unknown[]; message?: string } {
     let catalog: Catalog;
     try {
         catalog = getCatalog();
@@ -642,29 +641,6 @@ export function listCatalog(): unknown[] {
             canRollback: hasBackup(pluginsDir, entry.installDir),
         })),
     };
-    const records = recordedState();
-    return catalog.entries.map(entry => {
-        const record = records.get(entry.id) ?? null;
-        const disabled = isPluginDisabled(pluginsDir, entry.installDir);
-        const view = lifecycleView({
-            entry,
-            record,
-            disabled,
-            // A disabled copy has no backup to restore: disabling dropped it, so
-            // "restore previous" must not offer a version from before the state
-            // the user chose.
-            canRollback: !disabled && hasBackup(pluginsDir, entry.installDir),
-        });
-        return {
-            ...entry,
-            ...view,
-            // The record is what the lifecycle acts on; the directory is what the
-            // backend loads. They agree once every install is recorded, and when
-            // they do not, the copy on disk is the one the user is looking at.
-            installedVersion: installed.get(entry.id) ?? view.installedVersion,
-            bundled: bundled.has(entry.id),
-        };
-    });
 }
 
 /**
@@ -690,7 +666,11 @@ export function checkCatalogUpdates(): { ids: string[]; count: number } {
  */
 export function catalogSelectionEntries(): SelectionEntry[] {
     try {
-        return toSelectionEntries(listCatalog());
+        const result: any = listCatalog();
+        const entries = result && result.ok && Array.isArray(result.entries)
+            ? result.entries
+            : (Array.isArray(result) ? result : []);
+        return toSelectionEntries(entries);
     } catch (e) {
         console.error('[plugins] catalog unavailable', e);
         return [];
