@@ -55,6 +55,23 @@ export const IPC_WINDOW_SET_START_FULLSCREEN = 'window:setStartFullscreen' as co
 export const IPC_PLUGIN_CATALOG_PROGRESS = 'plugins:installCatalogProgress' as const;
 export const IPC_PLUGIN_CATALOG_CANCEL = 'plugins:cancelCatalogInstall' as const;
 
+// Per-plugin lifecycle operations (issue #21, lifecycle 2/6). Each one names a
+// plugin id — never a URL or a path — and the installed-state record decides what
+// may happen to it: a pinned or disabled plugin is not updated, and a downgrade
+// only ever reinstalls an archive the record already vouched for.
+// `plugins:uninstallCatalog` additionally takes whether the user's data goes
+// with it; the main process asks for that separately with a native dialog rather
+// than letting the renderer assert it.
+export const IPC_PLUGIN_UPDATE_CATALOG = 'plugins:updateCatalog' as const;
+export const IPC_PLUGIN_DOWNGRADE_CATALOG = 'plugins:downgradeCatalog' as const;
+export const IPC_PLUGIN_PIN_CATALOG = 'plugins:pinCatalog' as const;
+export const IPC_PLUGIN_SET_ENABLED = 'plugins:setCatalogEnabled' as const;
+export const IPC_PLUGIN_UNINSTALL_CATALOG = 'plugins:uninstallCatalog' as const;
+// Update check: which installed plugins the catalog would replace. A pinned or
+// disabled plugin is not in the answer, which is how "pinned plugins are
+// excluded from update checks" is kept true rather than merely displayed.
+export const IPC_PLUGIN_CHECK_UPDATES = 'plugins:checkUpdates' as const;
+
 // First-run guided plugin selection (issue #5). The wizard is a local window
 // (src/main/wizard.html) driven over these channels; `open` is what the Plugin
 // Manager's "setup wizard" button invokes to bring it back later.

@@ -133,7 +133,11 @@ test('SAFETY: song library, installed plugins and ML caches are ONLY in optInExt
         }
         // And they ARE present in optInExtras.
         assert.deepEqual(cats.optInExtras.songLibrary, [env.dlcDir], `${name}: songLibrary`);
-        assert.deepEqual(cats.optInExtras.installedPlugins, [env.pluginsDir], `${name}: installedPlugins`);
+        assert.deepEqual(
+            cats.optInExtras.installedPlugins,
+            [env.pluginsDir, path.join(env.userData, 'installed-plugins.json')],
+            `${name}: installedPlugins (the plugins dir and its installed-state record)`,
+        );
         assert.deepEqual(
             cats.optInExtras.mlCaches,
             [env.torchHome, env.hfHome],
@@ -171,7 +175,11 @@ test('buildDeleteSet honors flags and never widens to opt-in extras implicitly',
     extras.forEach((p) => assert.ok(fullPlusAll.includes(p), `opt-in missing ${p}`));
 
     const installedOnly = buildDeleteSet({ alsoInstalledPlugins: true }, cats);
-    assert.deepEqual(installedOnly, [env.pluginsDir]);
+    assert.deepEqual(installedOnly, cats.optInExtras.installedPlugins);
+    assert.ok(
+        installedOnly.includes(path.join(env.userData, 'installed-plugins.json')),
+        'the opt-in must take the installed-state record with the plugins it describes',
+    );
 
     // De-duplication: app + full must not double-list shared app paths.
     const merged = buildDeleteSet({ appSettings: true, fullReset: true }, cats);

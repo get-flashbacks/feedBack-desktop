@@ -602,6 +602,161 @@ test('backup paths only accept single catalog-style directory names', () => {
     }
 });
 
+// ── Disable / enable / remove (issue #21, lifecycle 2/6) ────────────────────
+//
+// The backend's plugin discovery is a one-level scan of the plugins dir, so the
+// disabled slot is a dot-prefixed directory directly under that root: a copy
+// parked there has no plugin.json at the scan's own level and is skipped by
+// name. These tests pin the properties the lifecycle depends on: the parked copy
+// is out of the scan, re-enabling restores the same bytes without a download, and
+// removing a copy takes the live, parked and backup copies with it.
+
+/** Install a plugin into a fresh plugins dir and return the setup. */
+async function installed(version = '1.0.0') {
+    const zip = pluginZip({ version });
+    const s = setup(zip, { version });
+    await installer.installCatalogEntry(s.entry, { pluginsDir: s.pluginsDir, fetch: s.fetch });
+    return s;
+}
+
+/** Install `version` over the copy already in `s`, as an update does. */
+async function updateTo(s, version) {
+    const zip = pluginZip({ version });
+    const entry = entryFor(zip, { version });
+    await installer.installCatalogEntry(entry, {
+        pluginsDir: s.pluginsDir,
+        fetch: fakeFetch({ [installer.archiveUrlFor(entry)]: { body: zip } }),
+    });
+    return entry;
+}
+
+test('disabled paths only accept single catalog-style directory names', () => {
+    const root = path.join(os.tmpdir(), 'plugins');
+    assert.strictEqual(installer.disabledPathFor(root, 'example'), path.join(root, installer.DISABLED_DIR, 'example'));
+    for (const bad of ['..', '../x', 'a/b', 'a\\b', '', '.hidden', 'has-dash', 'x'.concat('\0'), 42, null]) {
+        assert.throws(() => installer.disabledPathFor(root, bad), installer.InstallError, String(bad));
+        assert.throws(() => installer.isPluginDisabled(root, bad), installer.InstallError, String(bad));
+        assert.throws(() => installer.removePluginSource(root, bad), installer.InstallError, String(bad));
+    }
+});
+
+test('disabling parks the copy out of the scan and re-enabling brings back the same bytes', async () => {
+    const { pluginsDir } = await installed();
+    const live = path.join(pluginsDir, 'example');
+    const parked = installer.disabledPathFor(pluginsDir, 'example');
+    const before = fs.readFileSync(path.join(live, 'plugin.json'), 'utf8');
+
+    await installer.disablePlugin(pluginsDir, 'example');
+    assert.strictEqual(fs.readFileSync(path.join(parked, 'plugin.json'), 'utf8'), before);
+    assert.ok(!fs.existsSync(live), 'the copy leaves the directory the backend scans');
+    // The scan skips dot-prefixed names, so the parked slot is invisible to it,
+    // and it holds no plugin.json at its own root either.
+    assert.ok(installer.DISABLED_DIR.startsWith('.'));
+    assert.ok(!fs.existsSync(path.join(pluginsDir, installer.DISABLED_DIR, 'plugin.json')));
+    assert.ok(installer.isPluginDisabled(pluginsDir, 'example'));
+
+    await installer.enablePlugin(pluginsDir, 'example');
+    assert.strictEqual(fs.readFileSync(path.join(live, 'plugin.json'), 'utf8'), before);
+    assert.ok(!fs.existsSync(parked));
+    assert.ok(!installer.isPluginDisabled(pluginsDir, 'example'));
+    assert.ok(!fs.existsSync(path.join(pluginsDir, installer.DISABLED_DIR)), 'the slot is cleaned up when empty');
+});
+
+test('disabling and enabling are refusable states, not silent no-ops', async () => {
+    const empty = path.join(tmpDir(), 'plugins');
+    fs.mkdirSync(empty);
+    await assert.rejects(installer.disablePlugin(empty, 'example'), /not installed/);
+    await assert.rejects(installer.enablePlugin(empty, 'example'), /not disabled/);
+
+    const { pluginsDir } = await installed();
+    const live = path.join(pluginsDir, 'example');
+    await installer.disablePlugin(pluginsDir, 'example');
+    // Disabling twice is idempotent — the copy is parked either way — but a state
+    // that is both live and parked is refused rather than resolved silently.
+    await installer.disablePlugin(pluginsDir, 'example');
+    assert.ok(installer.isPluginDisabled(pluginsDir, 'example'));
+
+    // Something else put a copy back in the live slot (a reinstall outside this
+    // path, say): neither direction may quietly replace the other.
+    fs.mkdirSync(live);
+    await assert.rejects(installer.disablePlugin(pluginsDir, 'example'), /both installed and disabled/);
+    await assert.rejects(installer.enablePlugin(pluginsDir, 'example'), /already installed/);
+    assert.ok(fs.existsSync(live), 'the live copy is left alone');
+
+    fs.rmSync(live, { recursive: true });
+    await installer.enablePlugin(pluginsDir, 'example');
+    assert.ok(fs.existsSync(path.join(live, 'plugin.json')));
+});
+
+test('a linked development checkout is never disabled or removed through it', async () => {
+    const { pluginsDir } = await installed();
+    const checkout = path.join(tmpDir(), 'checkout');
+    fs.mkdirSync(checkout);
+    fs.writeFileSync(path.join(checkout, 'plugin.json'), JSON.stringify({ id: 'example', name: 'Example', version: '1.0.0' }));
+    const live = path.join(pluginsDir, 'example');
+    fs.rmSync(live, { recursive: true });
+    fs.symlinkSync(checkout, live);
+
+    await assert.rejects(installer.disablePlugin(pluginsDir, 'example'), /development checkout/);
+    assert.ok(fs.existsSync(path.join(checkout, 'plugin.json')), 'the linked files are untouched');
+
+    // Removal unlinks rather than following, so the checkout survives.
+    installer.removePluginSource(pluginsDir, 'example');
+    assert.ok(!fs.existsSync(live));
+    assert.ok(fs.existsSync(path.join(checkout, 'plugin.json')));
+});
+
+test('removing a copy takes the live, parked and backup copies, and refuses when absent', async () => {
+    const s = await installed();
+    await updateTo(s, '2.0.0');
+    assert.ok(installer.hasBackup(s.pluginsDir, 'example'), 'the update left a rollback copy');
+
+    await installer.disablePlugin(s.pluginsDir, 'example');
+    const removed = installer.removePluginSource(s.pluginsDir, 'example');
+    assert.strictEqual(removed.disabled, true);
+    assert.ok(!fs.existsSync(installer.disabledPathFor(s.pluginsDir, 'example')));
+    assert.ok(!fs.existsSync(path.join(s.pluginsDir, 'example')));
+    assert.ok(!installer.hasBackup(s.pluginsDir, 'example'));
+    assert.throws(() => installer.removePluginSource(s.pluginsDir, 'example'), /not installed/);
+});
+
+test('disabling drops the backup, so a rollback cannot cross the state the user chose', async () => {
+    const s = await installed();
+    await updateTo(s, '2.0.0');
+    assert.ok(installer.hasBackup(s.pluginsDir, 'example'));
+    await installer.disablePlugin(s.pluginsDir, 'example');
+    assert.ok(!installer.hasBackup(s.pluginsDir, 'example'), 'the pre-disable version is no longer offered');
+});
+
+test('a symlinked disabled root is refused instead of parking a copy somewhere else', async () => {
+    const { pluginsDir } = await installed();
+    const outside = tmpDir();
+    fs.symlinkSync(outside, path.join(pluginsDir, installer.DISABLED_DIR));
+    await assert.rejects(installer.disablePlugin(pluginsDir, 'example'), /not usable/);
+    assert.ok(fs.existsSync(path.join(pluginsDir, 'example', 'plugin.json')), 'the copy stays live');
+    assert.ok(!fs.existsSync(path.join(outside, 'example')), 'nothing was written through the link');
+});
+
+test('a squatted disabled slot never passes for a parked plugin', async () => {
+    const outside = tmpDir();
+    for (const squat of [
+        { name: 'a file', make: (slot) => fs.writeFileSync(slot, 'not a plugin') },
+        { name: 'a link', make: (slot) => fs.symlinkSync(outside, slot) },
+    ]) {
+        const { pluginsDir } = await installed();
+        const slot = installer.disabledPathFor(pluginsDir, 'example');
+        fs.mkdirSync(path.dirname(slot), { recursive: true });
+        squat.make(slot);
+
+        // The state check must not report this plugin as disabled, or the UI
+        // would offer a button that cannot do what it says.
+        assert.strictEqual(installer.isPluginDisabled(pluginsDir, 'example'), false, squat.name);
+        await assert.rejects(installer.disablePlugin(pluginsDir, 'example'), /occupied by a file or link/);
+        await assert.rejects(installer.enablePlugin(pluginsDir, 'example'), /could not be read/);
+        assert.ok(fs.existsSync(path.join(pluginsDir, 'example', 'plugin.json')), `the copy stays live (${squat.name})`);
+    }
+});
+
 function pairSetup(defs) {
     const pluginsDir = path.join(tmpDir(), 'plugins');
     fs.mkdirSync(pluginsDir);

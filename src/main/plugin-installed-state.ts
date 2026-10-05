@@ -13,13 +13,16 @@
 // Shape and behaviour:
 //   * versioned via `schemaVersion`; a record written by a newer app is read as
 //     "unsupported" and never overwritten, so a downgrade cannot destroy
-//     provenance it does not understand;
+//     provenance it does not understand. An older supported schema is migrated
+//     on read, so a record written by the previous release keeps working;
 //   * every field is re-validated on read, so a truncated, hand-edited or
 //     otherwise damaged record degrades to "bundled baseline only" instead of
 //     steering a lifecycle operation;
-//   * writes are atomic (temp file, fsync, rename), so a crash mid-write cannot
-//     leave a half-written record behind. A leftover `<record>.tmp` from such a
-//     crash is ignored by readers and overwritten by the next write.
+//   * writes are atomic (temp file, fsync, rename) and serialized through
+//     `updateInstalledState`, so a crash mid-write cannot leave a half-written
+//     record behind and two lifecycle operations cannot drop each other's
+//     entries. A leftover `<record>.tmp` from such a crash is ignored by readers
+//     and overwritten by the next write.
 //
 // Pure Node (no electron import) so it is unit-testable under node:test, like
 // plugin-archive.ts and plugin-installer.ts.
@@ -29,6 +32,7 @@ import * as path from 'path';
 import {
     type CatalogEntry,
     isArchiveDigest,
+    isCatalogSource,
     isCommitSha,
     isInstallDirName,
     isPluginId,
@@ -36,8 +40,16 @@ import {
     isRepositoryUrl,
 } from './plugin-installer';
 
-/** Bumped whenever the on-disk shape changes in a way readers must notice. */
-export const SCHEMA_VERSION = 1;
+/** Bumped whenever the on-disk shape changes in a way readers must notice.
+ *  v2 added the lifecycle state of lifecycle 2/6: `enabled`, `pinned` and the
+ *  `previousVersions` a downgrade reinstalls from. A v1 record is migrated on
+ *  read rather than rejected — nothing in it means anything different, it only
+ *  lacks the fields the lifecycle now writes. */
+export const SCHEMA_VERSION = 2;
+
+/** Oldest schema this build can still read. Anything below it is treated as
+ *  damaged, exactly as an unknown future version is left alone. */
+const MIN_SCHEMA_VERSION = 1;
 
 /** File name inside the state directory, alongside the app's other state files. */
 export const RECORD_FILE = 'installed-plugins.json';
@@ -45,6 +57,11 @@ export const RECORD_FILE = 'installed-plugins.json';
 /** The backend already refuses to load more than a few dozen plugins, so this
  *  is far above any real catalog; it only bounds what one file can hold. */
 const MAX_RECORDS = 500;
+
+/** Same reason: bounds the size of one plugin's downgrade history, and with it
+ *  the whole file. A plugin that has been through this many versions is far
+ *  past anything a real update stream produces. */
+export const MAX_HISTORY = 10;
 
 /** Size gate for the same reason: a damaged or hostile file is refused before
  *  it is parsed, so a read stays bounded work in the main process. */
@@ -62,7 +79,12 @@ export class InstalledStateError extends Error {
     }
 }
 
-/** One installed optional plugin. Every field is required and validated. */
+/**
+ * One installed optional plugin. The provenance fields (id, installDir, version,
+ * repository, commit, archiveSha256, installedAt, catalogRevision) are required
+ * and validated; the lifecycle state below is required too, except for the
+ * archive sizes and the history, which only exist once the lifecycle has run.
+ */
 export interface InstalledPluginRecord {
     /** Catalog plugin id. */
     id: string;
@@ -80,6 +102,55 @@ export interface InstalledPluginRecord {
     installedAt: string;
     /** Catalog revision the entry was resolved from (release-record digest). */
     catalogRevision: string;
+    /**
+     * The rest of what a recorded pin needs to reinstall this exact archive: the
+     * catalog trust class, and the archive sizes the installer checks the
+     * download against. A copy installed before schema v2 has none of them, and
+     * is therefore reported as having no downgrade target until its next update
+     * records them (see `pinFor`).
+     */
+    source?: CatalogEntry['source'];
+    downloadBytes?: number;
+    installedBytes?: number;
+    /**
+     * False when the user disabled the plugin without uninstalling it (2/6): the
+     * copy is parked outside the backend's scan, and this is what says so. A
+     * record without the field (v1) was written before disabling existed and
+     * migrates to true.
+     */
+    enabled: boolean;
+    /**
+     * True when the user pinned the *recorded version* — update checks leave it
+     * alone. Any operation that installs a different version clears the pin,
+     * because the pin was a statement about the version that was installed then.
+     */
+    pinned: boolean;
+    /**
+     * Earlier pins this copy went through, newest first, for the downgrade
+     * operation (2/6). Each entry carries everything the installer needs to
+     * reinstall that exact archive, so a downgrade is verified against the same
+     * digest the catalog pinned when that version was current. Omitted from the
+     * file while empty, capped at MAX_HISTORY.
+     */
+    previousVersions?: RecordedPin[];
+}
+
+/**
+ * One previously installed version of a plugin: enough to reinstall exactly
+ * that archive, and to report which catalog revision it came from. The archive
+ * size is part of the pin because the installer refuses a download whose length
+ * or expanded size differs from the entry it is verifying.
+ */
+export interface RecordedPin {
+    version: string;
+    repository: string;
+    commit: string;
+    archiveSha256: string;
+    downloadBytes: number;
+    installedBytes: number;
+    catalogRevision: string;
+    /** Trust class of the catalog entry this version was installed from. */
+    source: CatalogEntry['source'];
 }
 
 /** Why an on-disk record could not be used. Its absence means "used as-is". */
@@ -124,8 +195,35 @@ function isCanonicalTimestamp(value: unknown): value is string {
     return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }
 
+function isValidPin(pin: unknown): pin is RecordedPin {
+    if (!isObject(pin)) return false;
+    return isPluginVersion(pin.version)
+        && isRepositoryUrl(pin.repository)
+        && isCommitSha(pin.commit)
+        && isArchiveDigest(pin.archiveSha256)
+        && isPositiveByteCount(pin.downloadBytes)
+        && isNonNegativeByteCount(pin.installedBytes)
+        && isCatalogRevision(pin.catalogRevision)
+        && isCatalogSource(pin.source);
+}
+
+function isCatalogRevision(value: unknown): value is string {
+    return typeof value === 'string'
+        && value.length > 0
+        && value.length <= MAX_CATALOG_REVISION_LENGTH;
+}
+
+function isNonNegativeByteCount(value: unknown): value is number {
+    return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function isPositiveByteCount(value: unknown): value is number {
+    return Number.isInteger(value) && (value as number) > 0;
+}
+
 function isValidRecord(record: unknown): record is InstalledPluginRecord {
     if (!isObject(record)) return false;
+    const hasSizes = record.downloadBytes !== undefined || record.installedBytes !== undefined;
     return isPluginId(record.id)
         && isInstallDirName(record.installDir)
         && isPluginVersion(record.version)
@@ -133,9 +231,37 @@ function isValidRecord(record: unknown): record is InstalledPluginRecord {
         && isCommitSha(record.commit)
         && isArchiveDigest(record.archiveSha256)
         && isCanonicalTimestamp(record.installedAt)
-        && typeof record.catalogRevision === 'string'
-        && record.catalogRevision.length > 0
-        && record.catalogRevision.length <= MAX_CATALOG_REVISION_LENGTH;
+        && isCatalogRevision(record.catalogRevision)
+        && (record.source === undefined || isCatalogSource(record.source))
+        && (!hasSizes || (isPositiveByteCount(record.downloadBytes) && isNonNegativeByteCount(record.installedBytes)))
+        && typeof record.enabled === 'boolean'
+        && typeof record.pinned === 'boolean'
+        && (record.previousVersions === undefined
+            || (Array.isArray(record.previousVersions)
+                && record.previousVersions.length <= MAX_HISTORY
+                && record.previousVersions.every(isValidPin)));
+}
+
+/**
+ * Bring a v1 record up to the current shape. Everything v1 recorded still means
+ * the same thing; it just has no lifecycle state, and a plugin installed before
+ * disabling existed was necessarily enabled and unpinned. It also has no archive
+ * sizes, which leaves that one copy without a downgrade target until its next
+ * update records them.
+ */
+function migrateRecord(record: Record<string, unknown>): InstalledPluginRecord {
+    return {
+        id: record.id as string,
+        installDir: record.installDir as string,
+        version: record.version as string,
+        repository: record.repository as string,
+        commit: record.commit as string,
+        archiveSha256: record.archiveSha256 as string,
+        installedAt: record.installedAt as string,
+        catalogRevision: record.catalogRevision as string,
+        enabled: true,
+        pinned: false,
+    };
 }
 
 function emptyState(issue: InstalledStateIssue, schemaVersion = 0): InstalledState {
@@ -190,28 +316,38 @@ export function readInstalledState(stateDir: string): InstalledState {
         console.warn(`[plugin-installed-state] record is schema v${schemaVersion} (this app writes v${SCHEMA_VERSION}); leaving it alone`);
         return emptyState('unsupported-schema', schemaVersion);
     }
-    if (schemaVersion < SCHEMA_VERSION) {
-        // No schema older than v1 has ever been written, so this can only be a
-        // damaged or hand-made file. Later versions add a migration here.
-        console.warn(`[plugin-installed-state] record is schema v${schemaVersion}, older than v${SCHEMA_VERSION}; ignoring it: ${file}`);
+    if (schemaVersion < MIN_SCHEMA_VERSION) {
+        console.warn(`[plugin-installed-state] record is schema v${schemaVersion}, older than v${MIN_SCHEMA_VERSION}; ignoring it: ${file}`);
         return emptyState('corrupt');
     }
     if (!isObject(parsed.plugins)) {
         console.warn(`[plugin-installed-state] record has no plugin table; ignoring it: ${file}`);
         return emptyState('corrupt');
     }
+    // An older supported schema is read through its migration rather than
+    // rejected, so an install recorded by the previous release keeps its pin,
+    // provenance and downgrade history. The file itself stays on the old schema
+    // until the next write rewrites it.
+    const migrate = schemaVersion < SCHEMA_VERSION
+        ? migrateRecord
+        : (r: Record<string, unknown>) => r as unknown as InstalledPluginRecord;
 
     const plugins = new Map<string, InstalledPluginRecord>();
     for (const [id, value] of Object.entries(parsed.plugins)) {
-        if (!isValidRecord(value) || value.id !== id) {
+        if (!isObject(value)) {
             console.warn(`[plugin-installed-state] dropping invalid record for plugin ${id}`);
             continue;
         }
-        plugins.set(id, value);
+        const record = migrate(value);
+        if (!isValidRecord(record) || record.id !== id) {
+            console.warn(`[plugin-installed-state] dropping invalid record for plugin ${id}`);
+            continue;
+        }
+        plugins.set(id, record);
     }
     return isCanonicalTimestamp(parsed.updatedAt)
-        ? { plugins, schemaVersion, updatedAt: parsed.updatedAt }
-        : { plugins, schemaVersion };
+        ? { plugins, schemaVersion: SCHEMA_VERSION, updatedAt: parsed.updatedAt }
+        : { plugins, schemaVersion: SCHEMA_VERSION };
 }
 
 /**
@@ -229,7 +365,8 @@ export function readInstalledState(stateDir: string): InstalledState {
  *
  * Callers must serialize their writes: the record is re-read to check its schema
  * and then replaced wholesale, and the temp file has a fixed name, so two
- * concurrent writers can drop each other's entries.
+ * concurrent writers can drop each other's entries. `updateInstalledState` below
+ * does the serializing; anything reaching this function directly must not race.
  */
 export function writeInstalledState(
     stateDir: string,
@@ -293,11 +430,47 @@ export function writeInstalledState(
 }
 
 /**
+ * Read-modify-write the record, serialized.
+ *
+ * Every lifecycle operation changes one plugin's entry, and the file is replaced
+ * wholesale, so two of them running at once (an update finishing while an
+ * uninstall starts) would read the same snapshot and the second write would drop
+ * the first one's entry. This is the single writer the lifecycle uses: each call
+ * waits for the previous one, hands the mutator a private copy of the current
+ * records, and writes the result. A mutator that throws leaves the file untouched.
+ */
+export async function updateInstalledState<T>(
+    stateDir: string,
+    mutate: (records: Map<string, InstalledPluginRecord>) => T,
+    now: string,
+): Promise<T> {
+    const result = writeQueue.then(async () => {
+        const records = new Map(readInstalledState(stateDir).plugins);
+        const value = mutate(records);
+        writeInstalledState(stateDir, records.values(), now);
+        return value;
+    });
+    // The chain must survive a rejected mutation, or every later write would
+    // queue behind a rejection that nothing handles.
+    writeQueue = result.then(() => undefined, () => undefined);
+    return result;
+}
+
+let writeQueue: Promise<void> = Promise.resolve();
+
+/**
  * Build the record for a freshly installed catalog entry. The catalog already
  * validated the entry and the download was pinned to it, so every field the
- * lifecycle needs comes straight from the entry.
+ * lifecycle needs comes straight from the entry. A plugin that was disabled and
+ * is being reinstalled or updated in place comes back disabled, so an operation
+ * that swaps the source never quietly re-enables the plugin.
  */
-export function installedRecordFor(entry: CatalogEntry, catalogRevision: string, installedAt: string): InstalledPluginRecord {
+export function installedRecordFor(
+    entry: CatalogEntry,
+    catalogRevision: string,
+    installedAt: string,
+    options: { enabled?: boolean; previousVersions?: RecordedPin[] } = {},
+): InstalledPluginRecord {
     const record: InstalledPluginRecord = {
         id: entry.id,
         installDir: entry.installDir,
@@ -307,9 +480,42 @@ export function installedRecordFor(entry: CatalogEntry, catalogRevision: string,
         archiveSha256: entry.archiveSha256,
         installedAt,
         catalogRevision,
+        source: entry.source,
+        downloadBytes: entry.size.downloadBytes,
+        installedBytes: entry.size.installedBytes,
+        enabled: options.enabled !== false,
+        // A pin is a statement about the version that is installed, so a fresh
+        // record starts unpinned; a pin the user set is re-applied deliberately.
+        pinned: false,
     };
+    const history = options.previousVersions ?? [];
+    if (history.length) record.previousVersions = history;
     if (!isValidRecord(record)) {
         throw new InstalledStateError(`${entry.name} cannot be recorded as installed.`);
     }
     return record;
+}
+
+/**
+ * The pin of an installed copy, ready to be pushed onto `previousVersions` when a
+ * later version displaces it. Null for a copy installed before schema v2: it
+ * recorded neither the archive sizes nor the catalog trust class, and the
+ * installer refuses a download whose length or expanded size it cannot check
+ * against the entry it verifies. Such a copy can still be put back from the
+ * backup slot, which holds the actual files.
+ */
+export function pinFor(record: InstalledPluginRecord): RecordedPin | null {
+    if (record.source === undefined || record.downloadBytes === undefined || record.installedBytes === undefined) {
+        return null;
+    }
+    return {
+        version: record.version,
+        repository: record.repository,
+        commit: record.commit,
+        archiveSha256: record.archiveSha256,
+        downloadBytes: record.downloadBytes,
+        installedBytes: record.installedBytes,
+        catalogRevision: record.catalogRevision,
+        source: record.source,
+    };
 }

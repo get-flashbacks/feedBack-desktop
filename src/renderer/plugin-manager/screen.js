@@ -169,15 +169,22 @@
                 const outdated = !!entry.installedVersion && entry.installedVersion !== entry.version;
                 const installable = !entry.installedVersion || outdated;
                 const row = document.createElement('label');
-                row.className = `flex items-start gap-3 p-3 rounded border ${!installable ? 'bg-emerald-900/20 border-emerald-800' : 'bg-slate-800/50 border-slate-700'}`;
+                // Anything installed reads as installed, whether or not the
+                // catalog has something newer to offer.
+                row.className = `flex items-start gap-3 flex-wrap p-3 rounded border ${entry.installedVersion ? 'bg-emerald-900/20 border-emerald-800' : 'bg-slate-800/50 border-slate-700'}`;
 
                 const box = document.createElement('input');
                 box.type = 'checkbox';
                 box.className = 'mt-1 accent-emerald-500';
-                box.checked = catalogSelection.has(entry.id);
                 // Essentials ship with the app, and bundled entries ship with the
                 // app too — the installer refuses to place a second copy.
-                box.disabled = !installable || entry.bundled || selection.tier === 'essential';
+                // A pinned or disabled plugin is installed too, and main refuses to
+                // install another version over either: the row offers Pin/Unpin or
+                // Enable instead, so the checkbox is off rather than a dead end.
+                const held = !!entry.pinned || !!entry.disabled;
+                box.disabled = !installable || entry.bundled || selection.tier === 'essential' || held;
+                if (box.disabled) catalogSelection.delete(entry.id);
+                box.checked = catalogSelection.has(entry.id);
                 box.addEventListener('change', () => {
                     if (box.checked) catalogSelection.add(entry.id);
                     else catalogSelection.delete(entry.id);
@@ -187,12 +194,13 @@
                 const meta = document.createElement('div');
                 meta.className = 'flex-1 min-w-0';
                 meta.innerHTML = `
-                    <div class="flex items-center gap-2">
+                    <div class="flex items-center gap-2 flex-wrap">
                         <span class="text-sm font-medium text-slate-200">${esc(entry.name)}</span>
                         <span class="text-xs text-slate-500">v${esc(entry.version)}</span>
                         ${selection.tier === 'essential' ? '<span class="text-xs text-sky-300">Essential</span>' : ''}
                         ${entry.bundled ? '<span class="text-xs text-sky-300">Included</span>' : ''}
-                        ${entry.installedVersion ? `<span class="text-xs text-emerald-400">Installed v${esc(entry.installedVersion)}${outdated ? ' — update available' : ''}</span>` : ''}
+                        ${entry.installedVersion ? `<span class="text-xs text-emerald-400">Installed v${esc(entry.installedVersion)}</span>` : ''}
+                        ${lifecycleBadge(entry)}
                         ${entry.canRollback ? '<span class="text-xs text-amber-300">Previous version available</span>' : ''}
                     </div>
                     <div class="text-xs text-slate-400 mt-0.5">${esc(entry.description || '')}</div>
@@ -204,12 +212,16 @@
 
                 row.appendChild(box);
                 row.appendChild(meta);
+                for (const control of lifecycleControls(entry)) row.appendChild(control);
 
                 if (entry.canRollback) {
                     const restore = document.createElement('button');
                     restore.className = 'text-xs px-2 py-1 rounded bg-amber-600/50 hover:bg-amber-500 self-center';
                     restore.textContent = 'Restore previous';
-                    restore.addEventListener('click', async () => {
+                    restore.addEventListener('click', async (event) => {
+                        // The row is a <label> for the install checkbox.
+                        event.preventDefault();
+                        event.stopPropagation();
                         restore.disabled = true;
                         const res = await plugins.rollbackCatalog(entry.id);
                         showCatalogMessage(res.message, res.success);
@@ -221,8 +233,119 @@
                 catalogBox.appendChild(row);
             }
             updateInstallLabel();
+            await updateCheckBadge();
         } catch (e) {
             catalogBox.innerHTML = `<div class="text-sm text-red-400">Error loading the plugin catalog: ${esc(e.message)}</div>`;
+        }
+    }
+
+    // ── Per-plugin lifecycle controls (issue #21) ─────────────────────────
+    // Each button is only rendered for the state it applies to, so the screen
+    // cannot offer an operation the main process would refuse — and the refusal
+    // message from main is what the user sees if the state changed underneath.
+    const checkBadge = $('pm-update-check');
+
+    function lifecycleBadge(entry) {
+        const badges = [];
+        if (entry.installed && entry.disabled) badges.push('<span class="text-xs text-slate-400">Disabled</span>');
+        if (entry.pinned) badges.push(`<span class="text-xs text-sky-300">Pinned at v${esc(entry.installedVersion || '')}</span>`);
+        else if (entry.updateStatus === 'available') badges.push(`<span class="text-xs text-amber-300">Update available: v${esc(entry.version)}</span>`);
+        else if (entry.updateStatus === 'republished') badges.push('<span class="text-xs text-amber-300">This version was re-published</span>');
+        else if (entry.updateStatus === 'ahead') badges.push('<span class="text-xs text-amber-300">The catalog is behind this copy</span>');
+        return badges.join(' ');
+    }
+
+    function lifecycleControl(label, className, title, run) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `text-xs px-2 py-1 rounded self-center whitespace-nowrap ${className}`;
+        button.textContent = label;
+        button.title = title;
+        button.addEventListener('click', async (event) => {
+            // The row is a <label> for the install checkbox; a button inside it
+            // would otherwise also toggle that checkbox.
+            event.preventDefault();
+            event.stopPropagation();
+            const idle = button.textContent;
+            button.disabled = true;
+            button.textContent = 'Working…';
+            try {
+                const res = await run();
+                showCatalogMessage(res && res.message ? res.message : 'Done.', !(res && res.success === false));
+            } catch (e) {
+                showCatalogMessage('Error: ' + (e?.message || e), false);
+            } finally {
+                button.disabled = false;
+                button.textContent = idle;
+                await refreshCatalog();
+                await refreshList();
+            }
+        });
+        return button;
+    }
+
+    function lifecycleControls(entry) {
+        const controls = [];
+        if (!entry.installed) return controls;
+        if (entry.updateAvailable) {
+            controls.push(lifecycleControl(
+                'Update',
+                'bg-blue-600 hover:bg-blue-500',
+                `Install ${entry.name} ${entry.version} over ${entry.installedVersion}`,
+                () => plugins.updateCatalog(entry.id),
+            ));
+        }
+        if (entry.pinned) {
+            controls.push(lifecycleControl(
+                'Unpin',
+                'bg-sky-700 hover:bg-sky-600',
+                'Let update checks offer newer versions again',
+                () => plugins.pinCatalog(entry.id, false),
+            ));
+        } else if (!entry.disabled) {
+            controls.push(lifecycleControl(
+                'Pin',
+                'bg-slate-600 hover:bg-slate-500',
+                `Keep version ${entry.installedVersion} even when a newer one is published`,
+                () => plugins.pinCatalog(entry.id, true),
+            ));
+        }
+        for (const version of Array.isArray(entry.downgradeVersions) ? entry.downgradeVersions : []) {
+            controls.push(lifecycleControl(
+                `Downgrade ${version}`,
+                'bg-amber-600/50 hover:bg-amber-500',
+                `Reinstall the recorded version ${version}`,
+                () => plugins.downgradeCatalog(entry.id, version),
+            ));
+        }
+        controls.push(lifecycleControl(
+            entry.disabled ? 'Enable' : 'Disable',
+            entry.disabled ? 'bg-emerald-700 hover:bg-emerald-600' : 'bg-slate-700 hover:bg-slate-600',
+            entry.disabled
+                ? 'Move the plugin back so the server loads it again'
+                : 'Stop the server loading this plugin, keeping its files and settings',
+            () => plugins.setEnabled(entry.id, !entry.disabled),
+        ));
+        controls.push(lifecycleControl(
+            'Uninstall',
+            'bg-red-600/50 hover:bg-red-500',
+            'Remove the plugin. You are asked whether to delete its data too.',
+            () => plugins.uninstallCatalog(entry.id),
+        ));
+        return controls;
+    }
+
+    async function updateCheckBadge() {
+        if (!checkBadge || typeof plugins.checkUpdates !== 'function') return;
+        try {
+            const result = await plugins.checkUpdates();
+            const count = result && typeof result.count === 'number' ? result.count : 0;
+            checkBadge.textContent = count
+                ? `${count} plugin${count === 1 ? '' : 's'} can be updated`
+                : 'All catalog plugins are up to date';
+            checkBadge.className = `text-xs ${count ? 'text-amber-300' : 'text-slate-500'}`;
+        } catch {
+            checkBadge.textContent = '';
         }
     }
 

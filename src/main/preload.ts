@@ -41,6 +41,12 @@ import {
     IPC_PANE_EVENT_TOGGLE,
     IPC_PLUGIN_CATALOG_PROGRESS,
     IPC_PLUGIN_CATALOG_CANCEL,
+    IPC_PLUGIN_CHECK_UPDATES,
+    IPC_PLUGIN_DOWNGRADE_CATALOG,
+    IPC_PLUGIN_PIN_CATALOG,
+    IPC_PLUGIN_SET_ENABLED,
+    IPC_PLUGIN_UNINSTALL_CATALOG,
+    IPC_PLUGIN_UPDATE_CATALOG,
     IPC_PLUGIN_WIZARD_OPEN,
     IPC_PLUGIN_WIZARD_GET_STATE,
     IPC_PLUGIN_WIZARD_PREVIEW,
@@ -518,6 +524,16 @@ const feedBackDesktopApi = {
         // Progress of the in-flight catalog batch (broadcast to every window),
         // and the shared cancel for it.
         cancelCatalogInstall: () => ipcRenderer.invoke(IPC_PLUGIN_CATALOG_CANCEL),
+        // Per-plugin lifecycle (issue #21). Every call names a plugin id; the main
+        // process decides what that plugin's recorded state allows. `uninstall` is
+        // the one operation that also asks the user, in a native dialog, whether
+        // their data goes with the plugin — the renderer cannot skip that question.
+        checkUpdates: () => ipcRenderer.invoke(IPC_PLUGIN_CHECK_UPDATES),
+        updateCatalog: (id: string) => ipcRenderer.invoke(IPC_PLUGIN_UPDATE_CATALOG, id),
+        downgradeCatalog: (id: string, version: string) => ipcRenderer.invoke(IPC_PLUGIN_DOWNGRADE_CATALOG, id, version),
+        pinCatalog: (id: string, pinned: boolean) => ipcRenderer.invoke(IPC_PLUGIN_PIN_CATALOG, id, pinned),
+        setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke(IPC_PLUGIN_SET_ENABLED, id, enabled),
+        uninstallCatalog: (id: string) => ipcRenderer.invoke(IPC_PLUGIN_UNINSTALL_CATALOG, id),
         onInstallProgress: (callback: (progress: PluginInstallProgress) => void) => {
             const listener = (_event: unknown, progress: PluginInstallProgress) => callback(progress);
             ipcRenderer.on(IPC_PLUGIN_CATALOG_PROGRESS, listener);
