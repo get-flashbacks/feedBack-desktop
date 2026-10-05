@@ -40,6 +40,9 @@ export class InstallError extends Error {
     }
 }
 
+/** The catalog trust classes, and the GitHub owner each one requires. */
+export type CatalogSource = 'get-flashbacks' | 'upstream-official' | 'reviewed-community';
+
 export interface CatalogEntry {
     id: string;
     installDir: string;
@@ -48,7 +51,7 @@ export interface CatalogEntry {
     version: string;
     commit: string;
     archiveSha256: string;
-    source: 'get-flashbacks' | 'upstream-official' | 'reviewed-community';
+    source: CatalogSource;
     dependencies: string[];
     conflicts: string[];
     size: { downloadBytes: number; installedBytes: number };
@@ -76,11 +79,20 @@ const DOWNLOAD_TIMEOUT_MS = 120000;
 // Organization-owned sources must come from the matching GitHub owner; only
 // `reviewed-community` entries may name a third-party owner, and those are
 // still pinned by commit + hash in the release-locked catalog.
-const SOURCE_OWNERS: Record<string, string | null> = {
+const SOURCE_OWNERS: Record<CatalogSource, string | null> = {
     'get-flashbacks': 'get-flashbacks',
     'upstream-official': 'got-feedback',
     'reviewed-community': null,
 };
+
+/**
+ * A trust class this build knows. Exported so the installed-state record's pin
+ * validation uses this table rather than a second copy of the list that could
+ * drift from it.
+ */
+export function isCatalogSource(value: unknown): value is CatalogSource {
+    return typeof value === 'string' && Object.hasOwn(SOURCE_OWNERS, value);
+}
 
 const SAFE_PLUGIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -165,7 +177,7 @@ export function validateCatalogEntry(entry: unknown): entry is CatalogEntry {
     if (!isPluginVersion(e.version)) return false;
     if (!isCommitSha(e.commit)) return false;
     if (!isArchiveDigest(e.archiveSha256)) return false;
-    if (typeof e.source !== 'string' || !(e.source in SOURCE_OWNERS)) return false;
+    if (!isCatalogSource(e.source)) return false;
     if (!isStringArray(e.dependencies) || !isStringArray(e.conflicts)) return false;
     if (!isObject(e.size)) return false;
     const { downloadBytes, installedBytes } = e.size as Record<string, unknown>;
@@ -175,7 +187,7 @@ export function validateCatalogEntry(entry: unknown): entry is CatalogEntry {
     if ((installedBytes as number) > DEFAULT_ARCHIVE_LIMITS.maxTotalBytes) return false;
     const parts = repositoryParts(e.repository);
     if (!parts) return false;
-    const requiredOwner = SOURCE_OWNERS[e.source as string];
+    const requiredOwner = SOURCE_OWNERS[e.source];
     if (requiredOwner && parts.owner.toLowerCase() !== requiredOwner) return false;
     return true;
 }
@@ -415,7 +427,12 @@ function rmdirIfEmpty(dir: string): void {
  * (or file) squatting on an installer-owned directory would otherwise
  * redirect renames outside the plugins root.
  */
-function ensureRealDirectory(dir: string, label: string): void {
+/**
+ * Prepare one of the installer's own directories, refusing anything that is not
+ * a real directory: a symlink there would redirect a rename outside the plugins
+ * root. `where` names the location in the message the user sees.
+ */
+function ensureRealDirectory(dir: string, where: string): void {
     try {
         fs.mkdirSync(dir, { recursive: true });
         const stat = fs.lstatSync(dir);
@@ -423,7 +440,7 @@ function ensureRealDirectory(dir: string, label: string): void {
     } catch (e) {
         console.error('[plugin-installer] could not prepare installer directory', e);
     }
-    throw new InstallError(`The backup location for ${label} is not usable. Remove the ${BACKUP_DIR} folder and retry.`);
+    throw new InstallError(`The ${where} is not usable. Remove it and retry.`);
 }
 
 function rmQuiet(target: string): void {
@@ -503,6 +520,174 @@ export function backupPathFor(pluginsDir: string, installDir: string): string {
 
 export function hasBackup(pluginsDir: string, installDir: string): boolean {
     return fs.existsSync(backupPathFor(pluginsDir, installDir));
+}
+
+// ── Disabling, re-enabling and removing a copy ──────────────────────────────
+
+/**
+ * Where a disabled copy waits. Same shape as the backup slot: a dot-prefixed
+ * directory directly under the plugins root, holding one directory per install
+ * dir. The backend's discovery scan is one level deep and skips dot-prefixed
+ * names, so a plugin parked here is invisible to it — which is the whole point of
+ * disabling, and why this cannot be `plugins/<dir>/disabled`.
+ */
+export const DISABLED_DIR = '.feedback-disabled';
+
+/**
+ * Parked slot for a disabled copy. `installDir` is validated against the
+ * catalog's install-dir pattern (a single safe segment); anything else throws,
+ * so no caller can build a path outside the disabled root by skipping validation.
+ */
+export function disabledPathFor(pluginsDir: string, installDir: string): string {
+    if (typeof installDir !== 'string' || !INSTALL_DIR_PATTERN.test(installDir)) {
+        throw new InstallError('Invalid plugin.');
+    }
+    // installDir is checked against INSTALL_DIR_PATTERN above
+    const target = path.join(path.resolve(pluginsDir), DISABLED_DIR, installDir);
+    const rel = path.relative(path.resolve(pluginsDir, DISABLED_DIR), target);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new InstallError('Invalid plugin.');
+    return target;
+}
+
+/**
+ * True when `dir` is a real directory — not a symlink, not a file. Anything
+ * squatting in one of the installer's own slots is a state the installer refuses
+ * to act on rather than treats as a plugin.
+ */
+function isRealDirectory(dir: string): boolean {
+    try {
+        const stat = fs.lstatSync(dir);
+        return stat.isDirectory() && !stat.isSymbolicLink();
+    } catch {
+        return false;
+    }
+}
+
+/** True when the copy is parked in the disabled slot. */
+export function isPluginDisabled(pluginsDir: string, installDir: string): boolean {
+    return isRealDirectory(disabledPathFor(pluginsDir, installDir));
+}
+
+/** Every place a copy of `installDir` can be on disk, live and parked. */
+function sourcePathsFor(pluginsDir: string, installDir: string): { live: string; disabled: string; backup: string } {
+    const root = path.resolve(pluginsDir);
+    const live = resolveSafePluginDir(root, installDir);
+    if (!live) throw new InstallError('Invalid plugin.');
+    return { live, disabled: disabledPathFor(root, installDir), backup: backupPathFor(root, installDir) };
+}
+
+/**
+ * Disable a copy: move it out of the backend's scan into the disabled slot. Its
+ * files, and anything the backend already wrote for it, are left alone, so
+ * re-enabling is a move back rather than a reinstall.
+ *
+ * The backup slot is dropped on the way in: it holds a version from before the
+ * disable, which is not something "restore previous version" should offer once
+ * the user has changed the state deliberately.
+ */
+export async function disablePlugin(pluginsDir: string, installDir: string): Promise<void> {
+    const { live, disabled, backup } = sourcePathsFor(pluginsDir, installDir);
+    // A slot holding something other than a real directory is squatting, and must
+    // not pass for an already-parked copy: reporting success here would tell the
+    // user the plugin is disabled while it is still live and loaded.
+    if (!isRealDirectory(disabled) && fs.existsSync(disabled)) {
+        throw new InstallError(`The disabled location for this plugin (${DISABLED_DIR}) is occupied by a file or link. Remove it and retry.`);
+    }
+    if (isPluginDisabled(pluginsDir, installDir)) {
+        // Already parked. Refuse rather than silently report success: the caller
+        // is answering a request to disable a copy that is live on disk.
+        if (fs.existsSync(live)) {
+            throw new InstallError('This plugin is present both installed and disabled. Restart the app and retry.');
+        }
+        rmQuiet(backup);
+        return;
+    }
+    let stat: fs.Stats;
+    try {
+        stat = fs.lstatSync(live);
+    } catch (e: any) {
+        if (e?.code === 'ENOENT') throw new InstallError('This plugin is not installed.');
+        throw new InstallError('This plugin could not be disabled.');
+    }
+    // A symlinked checkout is the developer's own working tree; moving it aside
+    // would take their uncommitted work with it.
+    if (stat.isSymbolicLink()) {
+        throw new InstallError('This plugin is linked to a development checkout, so it cannot be disabled. Unlink it first.');
+    }
+    if (!stat.isDirectory()) throw new InstallError('The install location for this plugin is occupied by a file.');
+    // literal directory name under the trusted plugins root
+    const disabledRoot = path.join(path.resolve(pluginsDir), DISABLED_DIR);
+    ensureRealDirectory(disabledRoot, `disabled-plugins location (${DISABLED_DIR})`);
+    try {
+        await renameWithRetry(live, disabled);
+    } catch (e) {
+        console.error('[plugin-installer] could not disable plugin', e);
+        throw new InstallError('This plugin is in use and could not be disabled. Close other apps using it and retry.');
+    }
+    rmQuiet(backup);
+}
+
+/**
+ * Move a disabled copy back into the backend's scan. Nothing is downloaded or
+ * verified: these are the same bytes that were verified when they were installed.
+ *
+ * Re-enabling does not download anything, so it cannot be constrained by the
+ * state the record claims. The directory itself is the authority: if a copy is
+ * parked it is moved back, and if one is live the user is told so rather than
+ * having their working copy replaced.
+ */
+export async function enablePlugin(pluginsDir: string, installDir: string): Promise<void> {
+    const { live, disabled } = sourcePathsFor(pluginsDir, installDir);
+    let stat: fs.Stats;
+    try {
+        stat = fs.lstatSync(disabled);
+    } catch (e: any) {
+        if (e?.code === 'ENOENT') throw new InstallError('This plugin is not disabled.');
+        throw new InstallError('This plugin could not be enabled.');
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new InstallError('The disabled copy of this plugin could not be read.');
+    }
+    if (fs.existsSync(live)) {
+        throw new InstallError('A copy of this plugin is already installed. Remove it before enabling this one.');
+    }
+    try {
+        await renameWithRetry(disabled, live);
+    } catch (e) {
+        console.error('[plugin-installer] could not enable plugin', e);
+        throw new InstallError('This plugin is in use and could not be enabled. Close other apps using it and retry.');
+    }
+    // literal directory name under the trusted plugins root
+    rmdirIfEmpty(path.join(path.resolve(pluginsDir), DISABLED_DIR));
+}
+
+/** What a removal actually deleted, so the caller can say so honestly. */
+export interface RemovedSource {
+    live: boolean;
+    disabled: boolean;
+    backup: boolean;
+}
+
+/**
+ * Delete every copy of a plugin from disk: the live directory, the disabled slot
+ * and the backup. `fs.rmSync` on a symlinked entry removes the link and not its
+ * target, so a developer's linked checkout cannot be deleted through this.
+ */
+export function removePluginSource(pluginsDir: string, installDir: string): RemovedSource {
+    const { live, disabled, backup } = sourcePathsFor(pluginsDir, installDir);
+    const removed: RemovedSource = {
+        live: fs.existsSync(live),
+        disabled: fs.existsSync(disabled),
+        backup: fs.existsSync(backup),
+    };
+    if (!removed.live && !removed.disabled && !removed.backup) {
+        throw new InstallError('This plugin is not installed.');
+    }
+    rmQuiet(live);
+    rmQuiet(disabled);
+    rmQuiet(backup);
+    rmdirIfEmpty(path.join(path.resolve(pluginsDir), DISABLED_DIR));
+    return removed;
 }
 
 /**
@@ -588,7 +773,7 @@ export async function installCatalogEntry(entry: CatalogEntry, opts: InstallerOp
         const backup = backupPathFor(pluginsDir, entry.installDir);
         // Both branches below write through the backup root (rmSync follows
         // symlinks), so it is validated once, before either of them runs.
-        ensureRealDirectory(path.dirname(backup), entry.name);
+        ensureRealDirectory(path.dirname(backup), `backup location for ${entry.name} (${BACKUP_DIR})`);
         let displaced: string | null = null;
         if (!hadPrevious) {
             // A backup without a live copy belongs to a plugin the user has

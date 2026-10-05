@@ -1,9 +1,11 @@
 'use strict';
 
-// Installed-state record for optional plugins (issue #20, lifecycle 1/6 of #6):
-// the versioned on-disk record every later lifecycle operation reads or writes.
-// Covers the full field set, the atomic temp-file + rename write, and the
-// degradation of a missing / unreadable / corrupt / foreign-schema record.
+// Installed-state record for optional plugins (issue #20, lifecycle 1/6 of #6,
+// continued by #21): the versioned on-disk record every later lifecycle
+// operation reads or writes. Covers the full field set, the atomic temp-file +
+// rename write, the serialized read-modify-write the lifecycle operations share,
+// the v1 → v2 migration, and the degradation of a missing / unreadable / corrupt
+// / foreign-schema record.
 
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -33,6 +35,10 @@ const COMMIT = 'a'.repeat(40);
 const DIGEST = 'b'.repeat(64);
 const CATALOG_REVISION = 'c'.repeat(64);
 const INSTALLED_AT = '2026-10-02T20:10:51.000Z';
+const DIGEST_V1 = 'd'.repeat(64);
+const COMMIT_V1 = 'e'.repeat(40);
+const DOWNLOAD_BYTES = 4096;
+const INSTALLED_BYTES = 20480;
 
 function catalogEntry(overrides = {}) {
     return {
@@ -44,12 +50,27 @@ function catalogEntry(overrides = {}) {
         commit: COMMIT,
         archiveSha256: DIGEST,
         source: 'get-flashbacks',
+        size: { downloadBytes: DOWNLOAD_BYTES, installedBytes: INSTALLED_BYTES },
         ...overrides,
     };
 }
 
 function record(overrides = {}) {
     return state.installedRecordFor(catalogEntry(overrides), CATALOG_REVISION, INSTALLED_AT);
+}
+
+function recordedPin(overrides = {}) {
+    return {
+        version: '1.0.0',
+        repository: 'https://github.com/get-flashbacks/feedBack-plugin-metronome',
+        commit: COMMIT_V1,
+        archiveSha256: DIGEST_V1,
+        downloadBytes: 3000,
+        installedBytes: 15000,
+        catalogRevision: 'f'.repeat(64),
+        source: 'get-flashbacks',
+        ...overrides,
+    };
 }
 
 function tmpDir(t) {
@@ -83,7 +104,23 @@ test('a record carries plugin id, version, repository, commit, hash, install tim
         archiveSha256: DIGEST,
         installedAt: INSTALLED_AT,
         catalogRevision: CATALOG_REVISION,
+        source: 'get-flashbacks',
+        downloadBytes: DOWNLOAD_BYTES,
+        installedBytes: INSTALLED_BYTES,
+        enabled: true,
+        pinned: false,
     });
+});
+
+test('a disabled copy is recorded as disabled and an empty history is omitted', () => {
+    const disabled = state.installedRecordFor(catalogEntry(), CATALOG_REVISION, INSTALLED_AT, { enabled: false });
+    assert.strictEqual(disabled.enabled, false);
+    assert.ok(!('previousVersions' in disabled), 'an empty history must not be written to the file');
+
+    const withHistory = state.installedRecordFor(catalogEntry(), CATALOG_REVISION, INSTALLED_AT, {
+        previousVersions: [recordedPin()],
+    });
+    assert.deepStrictEqual(withHistory.previousVersions, [recordedPin()]);
 });
 
 test('a written record round-trips every field through the versioned schema', (t) => {
@@ -145,7 +182,9 @@ test('a corrupt record degrades to bundled baseline only without throwing', (t) 
         JSON.stringify({ schemaVersion: 1 }),
         JSON.stringify({ schemaVersion: 'one', plugins: {} }),
         JSON.stringify({ schemaVersion: 0, plugins: {} }),
+        JSON.stringify({ schemaVersion: -1, plugins: {} }),
         JSON.stringify({ schemaVersion: 1, plugins: [] }),
+        JSON.stringify({ schemaVersion: 2, plugins: [] }),
     ];
     for (const body of bodies) {
         putRaw(dir, body);
@@ -183,9 +222,22 @@ test('individual damaged records are dropped, the rest of the record survives', 
         metronome_bad_revision: { ...good, id: 'metronome_bad_revision', catalogRevision: '' },
         metronome_bad_version: { ...good, id: 'metronome_bad_version', version: '1.2' },
         metronome_bad_repo: { ...good, id: 'metronome_bad_repo', repository: 'http://github.com/get-flashbacks/x' },
+        metronome_missing_enabled: { ...good, id: 'metronome_missing_enabled', enabled: undefined },
+        metronome_bad_pinned: { ...good, id: 'metronome_bad_pinned', pinned: 'yes' },
+        metronome_partial_sizes: { ...good, id: 'metronome_partial_sizes', installedBytes: undefined },
+        metronome_bad_size: { ...good, id: 'metronome_bad_size', downloadBytes: 0 },
+        metronome_bad_history: { ...good, id: 'metronome_bad_history', previousVersions: [recordedPin({ commit: 'main' })] },
+        metronome_history_bad_source: { ...good, id: 'metronome_history_bad_source', previousVersions: [recordedPin({ source: 'random' })] },
+        metronome_bad_source: { ...good, id: 'metronome_bad_source', source: 'random' },
+        metronome_history_not_list: { ...good, id: 'metronome_history_not_list', previousVersions: recordedPin() },
+        metronome_history_too_long: {
+            ...good,
+            id: 'metronome_history_too_long',
+            previousVersions: Array.from({ length: state.MAX_HISTORY + 1 }, (_, i) => recordedPin({ version: `0.0.${i}` })),
+        },
     };
     putRaw(dir, JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: state.SCHEMA_VERSION,
         updatedAt: INSTALLED_AT,
         plugins: { ...damaged, lyrics: { ...good, id: 'lyrics', installDir: 'lyrics', version: '1.12.2' } },
     }));
@@ -221,6 +273,156 @@ test('a record written by a newer app is read as unsupported and never overwritt
     assert.strictEqual(read.plugins.size, 0);
     assert.throws(() => state.writeInstalledState(dir, [record()], INSTALLED_AT), state.InstalledStateError);
     assert.strictEqual(fs.readFileSync(recordPath(dir), 'utf8'), future, 'the newer record must survive');
+});
+
+// ── Migration ───────────────────────────────────────────────────────────────
+
+/** A record as the v1 schema wrote it: provenance only, no lifecycle state. */
+function v1Record(overrides = {}) {
+    return {
+        id: 'metronome',
+        installDir: 'metronome',
+        version: '1.1.0',
+        repository: 'https://github.com/get-flashbacks/feedBack-plugin-metronome',
+        commit: COMMIT_V1,
+        archiveSha256: DIGEST_V1,
+        installedAt: INSTALLED_AT,
+        catalogRevision: CATALOG_REVISION,
+        ...overrides,
+    };
+}
+
+test('a v1 record is migrated to enabled and unpinned, keeping its provenance', (t) => {
+    const dir = tmpDir(t);
+    putRaw(dir, JSON.stringify({ schemaVersion: 1, updatedAt: INSTALLED_AT, plugins: { metronome: v1Record() } }));
+
+    const read = state.readInstalledState(dir);
+    assert.strictEqual(read.issue, undefined);
+    assert.strictEqual(read.schemaVersion, state.SCHEMA_VERSION, 'a migrated read reports the current schema');
+    assert.strictEqual(read.updatedAt, INSTALLED_AT);
+
+    const migrated = read.plugins.get('metronome');
+    assert.deepStrictEqual(migrated, {
+        ...v1Record(),
+        enabled: true,
+        pinned: false,
+    });
+    assert.strictEqual(migrated.downloadBytes, undefined, 'v1 recorded no archive sizes');
+    assert.strictEqual(state.pinFor(migrated), null, 'so that copy has no downgrade target');
+});
+
+test('a migrated record is not written back until something changes', (t) => {
+    const dir = tmpDir(t);
+    const body = JSON.stringify({ schemaVersion: 1, updatedAt: INSTALLED_AT, plugins: { metronome: v1Record() } });
+    putRaw(dir, body);
+    state.readInstalledState(dir);
+    assert.strictEqual(fs.readFileSync(recordPath(dir), 'utf8'), body, 'a read must not rewrite the file');
+
+    state.writeInstalledState(dir, [record()], INSTALLED_AT);
+    const raw = JSON.parse(fs.readFileSync(recordPath(dir), 'utf8'));
+    assert.strictEqual(raw.schemaVersion, state.SCHEMA_VERSION, 'the next write upgrades the file');
+});
+
+test('a v1 record whose provenance does not validate is still dropped after migration', (t) => {
+    const dir = tmpDir(t);
+    putRaw(dir, JSON.stringify({
+        schemaVersion: 1,
+        updatedAt: INSTALLED_AT,
+        plugins: { metronome: v1Record({ commit: 'main' }) },
+    }));
+    const read = state.readInstalledState(dir);
+    assert.strictEqual(read.issue, undefined);
+    assert.strictEqual(read.plugins.size, 0);
+});
+
+// ── Pin capture ─────────────────────────────────────────────────────────────
+
+test('pinFor captures the installed copy as a downgrade target', () => {
+    assert.deepStrictEqual(state.pinFor(record()), {
+        version: '1.2.0',
+        repository: 'https://github.com/get-flashbacks/feedBack-plugin-metronome',
+        commit: COMMIT,
+        archiveSha256: DIGEST,
+        downloadBytes: DOWNLOAD_BYTES,
+        installedBytes: INSTALLED_BYTES,
+        catalogRevision: CATALOG_REVISION,
+        source: 'get-flashbacks',
+    });
+});
+
+test('a copy without the fields a downgrade needs reports no target', () => {
+    assert.strictEqual(state.pinFor({ ...record(), source: undefined }), null);
+    assert.strictEqual(state.pinFor({ ...record(), downloadBytes: undefined, installedBytes: undefined }), null);
+});
+
+test('a pin is written back through the record and read back unchanged', (t) => {
+    const dir = tmpDir(t);
+    const updated = state.installedRecordFor(catalogEntry(), CATALOG_REVISION, INSTALLED_AT, {
+        previousVersions: [state.pinFor(record({ version: '1.1.0' }))],
+    });
+    state.writeInstalledState(dir, [updated], INSTALLED_AT);
+    assert.deepStrictEqual(state.readInstalledState(dir).plugins.get('metronome'), updated);
+});
+
+// ── Serialized read-modify-write ────────────────────────────────────────────
+
+test('updateInstalledState writes one entry without disturbing the others', async (t) => {
+    const dir = tmpDir(t);
+    state.writeInstalledState(dir, [record(), record({ id: 'feedpakr', installDir: 'feedpakr' })], INSTALLED_AT);
+
+    const changed = await state.updateInstalledState(dir, (records) => {
+        const metronome = records.get('metronome');
+        records.set('metronome', { ...metronome, pinned: true });
+        return metronome.version;
+    }, INSTALLED_AT);
+
+    assert.strictEqual(changed, '1.2.0');
+    const read = state.readInstalledState(dir);
+    assert.strictEqual(read.plugins.size, 2);
+    assert.strictEqual(read.plugins.get('metronome').pinned, true);
+    assert.strictEqual(read.plugins.get('feedpakr').pinned, false);
+});
+
+test('concurrent updates do not drop each other', async (t) => {
+    const dir = tmpDir(t);
+    state.writeInstalledState(dir, [record({ id: 'metronome', installDir: 'metronome' })], INSTALLED_AT);
+
+    // Each call reads the record, so overlapping them without serialization would
+    // leave only the last write standing. The chain is per module, so drive them
+    // through the same module instance as the tests above.
+    await Promise.all([
+        state.updateInstalledState(dir, (records) => records.set('feedpakr', record({ id: 'feedpakr', installDir: 'feedpakr' })), INSTALLED_AT),
+        state.updateInstalledState(dir, (records) => records.set('lyrics', record({ id: 'lyrics', installDir: 'lyrics' })), INSTALLED_AT),
+    ]);
+
+    assert.deepStrictEqual([...state.readInstalledState(dir).plugins.keys()].sort(), ['feedpakr', 'lyrics', 'metronome']);
+});
+
+test('a mutator that throws leaves the record untouched and does not block later writes', async (t) => {
+    const dir = tmpDir(t);
+    state.writeInstalledState(dir, [record()], INSTALLED_AT);
+    const before = fs.readFileSync(recordPath(dir), 'utf8');
+
+    await assert.rejects(
+        () => state.updateInstalledState(dir, () => { throw new Error('no'); }, INSTALLED_AT),
+        /no/,
+    );
+    assert.strictEqual(fs.readFileSync(recordPath(dir), 'utf8'), before);
+
+    await state.updateInstalledState(dir, (records) => records.set('lyrics', record({ id: 'lyrics', installDir: 'lyrics' })), INSTALLED_AT);
+    assert.strictEqual(state.readInstalledState(dir).plugins.size, 2);
+});
+
+test('an update to a record written by a newer app is refused, not written over', async (t) => {
+    const dir = tmpDir(t);
+    const future = JSON.stringify({ schemaVersion: state.SCHEMA_VERSION + 1, updatedAt: INSTALLED_AT, plugins: {} });
+    putRaw(dir, future);
+
+    await assert.rejects(
+        () => state.updateInstalledState(dir, (records) => records.set('metronome', record()), INSTALLED_AT),
+        state.InstalledStateError,
+    );
+    assert.strictEqual(fs.readFileSync(recordPath(dir), 'utf8'), future);
 });
 
 // ── Writing ─────────────────────────────────────────────────────────────────

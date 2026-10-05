@@ -16,6 +16,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { RECORD_FILE } from './plugin-installed-state';
 
 export interface ConfigPathEnv {
     /** process.platform — selects which Electron cache dirs are relevant. */
@@ -127,7 +128,15 @@ export function enumerateConfigPaths(env: ConfigPathEnv): ConfigPathCategories {
     ];
 
     const optInExtras = {
-        installedPlugins: [env.pluginsDir],
+        installedPlugins: [
+            env.pluginsDir,
+            // The installed-state record (plugin-installed-state.ts). It lives in
+            // userData, beside the plugins dir rather than inside it, and says
+            // which versions, pins and disable states the plugin dirs belong to —
+            // so removing the plugins without it would leave a record claiming
+            // installs that no longer exist.
+            path.join(u, RECORD_FILE),
+        ],
         songLibrary: [env.dlcDir],
         // Resolved from the env so a custom TORCH_HOME / HF_HOME is honored — the
         // app sets those for the backend (python.ts startPython), so the reset

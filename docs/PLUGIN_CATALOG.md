@@ -155,12 +155,13 @@ developer-supplied repository URLs. They still require Git.
 ## Installed-state record
 
 `src/main/plugin-installed-state.ts` persists what is installed for the plugin
-lifecycle (issue #20, lifecycle 1/6 of #6). It writes
+lifecycle (issue #20, lifecycle 1/6 of #6; schema v2 for 2/6). It writes
 `<userData>/installed-plugins.json` — the desktop's own state dir, not the
 plugins dir, because the record is desktop-owned state *about* that dir and the
 backend scans the plugins dir for plugins.
 
-One record per installed optional plugin, every field required:
+One record per installed optional plugin. The provenance fields are always
+required and validated:
 
 | Field | Meaning |
 | --- | --- |
@@ -173,7 +174,21 @@ One record per installed optional plugin, every field required:
 | `installedAt` | ISO-8601 UTC install time (`Date#toISOString`) |
 | `catalogRevision` | catalog revision the entry was resolved from (the release lock's `catalogSha256`) |
 
-The file is `{"schemaVersion": 1, "updatedAt": …, "plugins": {<id>: <record>}}`.
+Lifecycle 2/6 added the state the operations change, plus the three fields that
+make a recorded version reinstallable (see "Pin and downgrade" below). `source`,
+`downloadBytes` and `installedBytes` are optional as a group: they are what a
+recorded pin needs to be re-verified, so a copy installed before schema v2 has
+none of them and simply reports no downgrade target until its next update.
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | `false` while the user has the plugin disabled but still installed |
+| `pinned` | `true` while the user holds this version; updates are held |
+| `previousVersions` | versions a downgrade may reinstall, newest first, capped at 10. Each entry is a `RecordedPin`: version, repository, commit, `archiveSha256`, `catalogRevision`, `source` and the archive sizes |
+| `source` | catalog trust class (`get-flashbacks`, `upstream-official`, `reviewed-community`) |
+| `downloadBytes`, `installedBytes` | archive sizes, re-checked when the archive is downloaded again |
+
+The file is `{"schemaVersion": 2, "updatedAt": …, "plugins": {<id>: <record>}}`.
 Field patterns are shared with the installer (`isPluginId`, `isCommitSha`, … in
 `plugin-installer.ts`) so the record and the catalog gate cannot drift apart.
 One plugin per `id`, one directory per plugin: a write refuses a duplicate.
@@ -188,22 +203,61 @@ Behaviour that later lifecycle features depend on:
 - **A newer record is never overwritten.** A schema version above the one this
   app writes is reported as `unsupported-schema` and `writeInstalledState`
   refuses, so a downgrade cannot destroy provenance it does not understand.
-  There is no schema below v1 yet; that is where a migration goes.
+- **An older one is migrated, not rejected.** A v1 record is read as the same
+  plugin with `enabled: true` and `pinned: false`; the migration happens in
+  memory and is written back by the next write, so nothing is lost and a v1
+  install is fully usable.
 - **Writes are atomic.** The body is written to `installed-plugins.json.tmp`
   (created exclusively, so a symlink planted there is replaced rather than
   followed), flushed, and renamed over the record, so a crash mid-write leaves
   either the previous record or the new one. A leftover `.tmp` is ignored by
   readers and replaced by the next write. A write that cannot complete throws
   rather than silently dropping provenance.
-- **The operations that change the record are lifecycle 2/6** (update, pin,
-  downgrade, disable, uninstall), with precedence in 3/6 and rollback in 4/6.
-  Nothing writes the record until then. Three things 2/6 must settle: deleting an
-  installed plugin has to drop or reconcile its record, the opt-in "also delete
-  installed plugins" reset (`config-paths.ts`) removes only `pluginsDir`, so it has
-  to remove the record too or a full opt-in reset would leave a record claiming
-  plugins that are gone, and its writers must be serialized — a write re-reads the
-  record to check the schema and then replaces it wholesale, so two concurrent
-  read-modify-write callers would drop each other's entries.
+- **Writers are serialized.** `updateInstalledState` runs every
+  read-modify-write through one promise chain, because a write re-reads the
+  record to check the schema and then replaces it wholesale: two concurrent
+  callers would otherwise drop each other's entries. A mutator that throws
+  leaves the file untouched.
+
+## Plugin lifecycle operations (2/6)
+
+Issue #21 adds the five operations that act on an installed plugin. The rules
+are pure functions in `src/main/plugin-lifecycle.ts` — no electron, no
+filesystem, no network — and `plugin-manager.ts` performs the disk work those
+answers authorize. Every rule that could cost the user a working copy is a
+refusal, so each is tested on its own (`tests/plugin-lifecycle.test.js`) rather
+than only through the IPC surface.
+
+| Operation | Rule |
+| --- | --- |
+| Update | The catalog carries one version per plugin, so an update installs the catalog's version over the installed one — and only when the record is not pinned and not disabled. The digest is re-verified against the download, as for a fresh install. |
+| Pin | Pins the version that is installed now, which is all a pin can mean. A pin holds updates and republish checks; changing version (by update or downgrade) drops it, because it described the version that was there before. Unpinning is always allowed. |
+| Downgrade | Reinstalls a `previousVersions` pin — the same immutable archive the catalog pinned when that version was current — and re-verifies it against the digest recorded then. No renderer-supplied URL reaches the installer, and a pin that today's gate would refuse is refused rather than reinstalled unchecked. |
+| Disable | Moves the copy to `<pluginsDir>/.feedback-disabled/<installDir>` and sets `enabled: false`. The backend's scan is one level deep and skips dot-prefixed names, so a parked copy is invisible to it. No download is involved. |
+| Re-enable | Moves the same bytes back. Nothing is fetched or re-verified: the directory is the authority, so a parked copy is moved and a copy that is somehow live again is reported rather than replaced. |
+| Uninstall | Removes the live, parked and backup copies, drops the record, and offers to delete the plugin's data as a separate, explicit choice. |
+
+States are derived, not stored twice: a copy parked on disk is disabled whatever
+the record says, because the directory is what the backend sees.
+
+Notes that matter when changing any of this:
+
+- **Disabling drops the backup.** The backup slot holds a version from before
+  the disable; leaving it would keep offering "restore previous version" across
+  a state the user chose deliberately. The rollback semantics themselves are
+  lifecycle 4/6.
+- **Data deletion is a conservative, fixed list**, computed by
+  `userDataPathsForPlugin`: the plugin's own `plugin_data/<id>` directory, any
+  literal `plugin_data/<id>.*` sibling, and `pip_packages/<id>`. The rest of the
+  backend's config layout is left alone. The renderer never chooses this — the
+  main process asks, so a compromised renderer cannot turn "uninstall" into
+  "delete data".
+- **A dev checkout is never moved or deleted through a lifecycle path.** A
+  symlinked copy is refused for install, disable and downgrade, and removal
+  unlinks rather than following.
+- **Restarting the backend is part of the operation, not an afterthought.**
+  Enable, disable, update and downgrade each restart the Python backend and wait
+  for it, so the next operation sees the state the last one left.
 
 ## First-run guided selection
 

@@ -1217,8 +1217,11 @@ async function startup(): Promise<void> {
     // Initialize audio engine (JUCE native addon).
     initAudioBridge();
 
-    // Initialize plugin manager IPC handlers
-    initPluginManager();
+    // Initialize plugin manager IPC handlers. The uninstall confirmation is a
+    // native dialog parented to the main window: the renderer bridge is reachable
+    // by plugin scripts, so a renderer-only confirm is not a sufficient gate for
+    // "delete this plugin's data".
+    initPluginManager(() => mainWindow);
 
     // Initialize soundfont manager IPC handlers (Audio Quality preference)
     initSoundfontManager(() => mainWindow);
