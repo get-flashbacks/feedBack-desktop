@@ -230,7 +230,7 @@ than only through the IPC surface.
 
 | Operation | Rule |
 | --- | --- |
-| Update | The catalog carries one version per plugin, so an update installs the catalog's version over the installed one — and only when the record is not pinned and not disabled. The digest is re-verified against the download, as for a fresh install. |
+| Update | The catalog carries one version per plugin, so an update installs the catalog's version over the installed one — and only when the record is not pinned and not disabled. A copy the catalog is *behind* is refused as well: that install is a downgrade, not an update. The digest is re-verified against the download, as for a fresh install. |
 | Pin | Pins the version that is installed now, which is all a pin can mean. A pin holds updates and republish checks; changing version (by update or downgrade) drops it, because it described the version that was there before. Unpinning is always allowed. |
 | Downgrade | Reinstalls a `previousVersions` pin — the same immutable archive the catalog pinned when that version was current — and re-verifies it against the digest recorded then. No renderer-supplied URL reaches the installer, and a pin that today's gate would refuse is refused rather than reinstalled unchecked. |
 | Disable | Moves the copy to `<pluginsDir>/.feedback-disabled/<installDir>` and sets `enabled: false`. The backend's scan is one level deep and skips dot-prefixed names, so a parked copy is invisible to it. No download is involved. |
@@ -242,10 +242,26 @@ the record says, because the directory is what the backend sees.
 
 Notes that matter when changing any of this:
 
+- **One refusal for every path that installs the catalog's version**
+  (`installRefusal`), used by the per-plugin Update button and by the catalog
+  list's batch selection alike. Ticking the box in the list is not a way around
+  the button's rules: a pinned, disabled, up-to-date or `ahead` copy is refused
+  per plugin, with the same message the button would give. `ahead` is the case
+  that keeps its own `Downgrade` buttons, which reinstall a pin from the record.
+- **A record that will not write does not undo an install that landed.** Once the
+  backend has accepted a version its rollback backup is already gone, so a failed
+  record write is logged and the outcome reported as what happened. The mirror
+  case is reported rather than swallowed too: an uninstall whose record cannot be
+  dropped says so, instead of leaving a row that claims a version with no files.
 - **Disabling drops the backup.** The backup slot holds a version from before
   the disable; leaving it would keep offering "restore previous version" across
   a state the user chose deliberately. The rollback semantics themselves are
   lifecycle 4/6.
+- **A move that cannot succeed is named, not retried.** Renames retry on the
+  transient Windows `EPERM`/`EBUSY`; a cross-device `EXDEV` is permanent — the two
+  locations are on different volumes, or the filesystem will not rename a
+  directory at all — so it gets its own message rather than "close other apps
+  using it".
 - **Data deletion is a conservative, fixed list**, computed by
   `userDataPathsForPlugin`: the plugin's own `plugin_data/<id>` directory, any
   literal `plugin_data/<id>.*` sibling, and `pip_packages/<id>`. The rest of the
@@ -254,7 +270,11 @@ Notes that matter when changing any of this:
   "delete data".
 - **A dev checkout is never moved or deleted through a lifecycle path.** A
   symlinked copy is refused for install, disable and downgrade, and removal
-  unlinks rather than following.
+  unlinks rather than following. The installer's own roots
+  (`.feedback-disabled`, `.feedback-backups`) are checked on every path that
+  writes or deletes through them: `rename` and `rmSync` resolve every path
+  component but the last, so a link there would move or delete a directory
+  outside the plugins dir. A removal is refused whole rather than half-done.
 - **Restarting the backend is part of the operation, not an afterthought.**
   Enable, disable, update and downgrade each restart the Python backend and wait
   for it, so the next operation sees the state the last one left.

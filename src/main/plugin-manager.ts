@@ -68,13 +68,14 @@ import {
 import {
     downgradeCandidates,
     entryForPin,
+    installRefusal,
     lifecycleView,
     nextRecordAfterInstall,
     pluginIdFrom,
     recordAfterPinChange,
     resolveUpdate,
+    splitLifecycleRequests,
     updateCandidates,
-    updateStatusFor,
     userDataPathsForPlugin,
     versionFrom,
 } from './plugin-lifecycle';
@@ -333,6 +334,20 @@ async function recordInstalled(entries: CatalogEntry[], now = new Date().toISOSt
     }, now);
 }
 
+/**
+ * Record what landed on disk, reporting only the recording failure itself. Once a
+ * version is live and the backend has accepted it, its rollback backup is already
+ * gone, so turning a record that will not write into a failed install would be
+ * the less honest answer — and the plugins dir stays the authority either way.
+ */
+async function recordQuietly(entries: CatalogEntry[]): Promise<void> {
+    try {
+        await recordInstalled(entries);
+    } catch (e) {
+        console.error('[plugins] could not record the installed state', e);
+    }
+}
+
 function readManifest(dir: string): Record<string, any> | null {
     try {
         // dir is a scanned plugin directory; the file name is a literal
@@ -519,37 +534,6 @@ export interface CatalogInstallOptions {
     signal?: AbortSignal;
 }
 
-/**
- * Split a requested selection into what the batch may install and what the
- * plugin's own recorded state forbids. The refusals come back as batch-shaped
- * results so the screen reports them per plugin instead of losing them.
- */
-function splitLifecycleRequests(
-    ids: string[],
-    catalog: Catalog,
-): { allowed: string[]; refused: { id: string; name: string; success: false; message: string }[] } {
-    const records = recordedState();
-    const allowed: string[] = [];
-    const refused: { id: string; name: string; success: false; message: string }[] = [];
-    for (const id of ids) {
-        const entry = catalog.byId.get(id);
-        const name = entry?.name ?? id;
-        const record = records.get(id);
-        if (!record) {
-            allowed.push(id);
-            continue;
-        }
-        if (record.enabled === false) {
-            refused.push({ id, name, success: false, message: `${name} is disabled. Enable it before installing another version.` });
-        } else if (record.pinned) {
-            refused.push({ id, name, success: false, message: `${name} is pinned at ${record.version}. Unpin it to install another version.` });
-        } else {
-            allowed.push(id);
-        }
-    }
-    return { allowed, refused };
-}
-
 export async function installFromCatalog(
     ids: unknown,
     options: CatalogInstallOptions = {},
@@ -582,8 +566,10 @@ export async function installFromCatalog(
         const catalog = getCatalog();
         // A pin or a disable is the user's decision about an installed copy, so
         // the batch path honours it too — selecting a pinned plugin in the
-        // catalog list must not be a way around "leave this version alone".
-        const { allowed, refused } = splitLifecycleRequests(ids as string[], catalog);
+        // catalog list must not be a way around "leave this version alone". A copy
+        // the catalog is behind is refused for the same reason: that install is a
+        // downgrade, and a downgrade only reinstalls a pin from the record.
+        const { allowed, refused } = splitLifecycleRequests(ids as string[], recordedState(), catalog.entries);
         const results = await installCatalogBatch(allowed, catalog, {
             pluginsDir,
             fetch: fetch as unknown as FetchLike,
@@ -600,15 +586,10 @@ export async function installFromCatalog(
         // Record what actually landed, before reporting: a plugin the batch
         // rolled back is not in `results` as installed, so the record and the
         // catalog list agree about what is on disk.
-        try {
-            const installed = results
-                .filter(r => r.success)
-                .map(r => catalog.byId.get(r.id))
-                .filter((entry): entry is CatalogEntry => entry !== undefined);
-            await recordInstalled(installed);
-        } catch (e) {
-            console.error('[plugins] could not record the installed state', e);
-        }
+        await recordQuietly(results
+            .filter(r => r.success)
+            .map(r => catalog.byId.get(r.id))
+            .filter((entry): entry is CatalogEntry => entry !== undefined));
         const message = cancelled
             ? 'Plugin installation cancelled. You can resume it from the Plugin Manager.'
             : failed === 0
@@ -819,14 +800,14 @@ async function installOverInstalled(
         const status = (await activateInstalled([outcome])).get(entry.id);
         if (status?.ok && status.confirmed !== false) {
             commitInstall(pluginsDir, entry.installDir);
-            await recordInstalled([entry]);
+            await recordQuietly([entry]);
             return { success: true, message: `${options.verb} ${entry.name} to ${entry.version}.` };
         }
         if (status?.ok) {
             // The server answered but never confirmed the load, which is not the
             // same as it working. Keep the backup as the way back and say so
             // rather than claiming the update succeeded.
-            await recordInstalled([entry]);
+            await recordQuietly([entry]);
             return {
                 success: true,
                 message: `${options.verb} ${entry.name} to ${entry.version}, but the server did not confirm it started. `
@@ -853,25 +834,6 @@ async function installOverInstalled(
     }
 }
 
-/** Why the catalog's entry cannot be installed over what is installed now. */
-function updateRefusal(entry: CatalogEntry, record: InstalledPluginRecord): string | null {
-    switch (updateStatusFor(record, entry)) {
-        case 'current':
-            return `${entry.name} is already up to date.`;
-        case 'pinned':
-            return `${entry.name} is pinned at ${record.version}. Unpin it to install ${entry.version}.`;
-        case 'disabled':
-            return `${entry.name} is disabled. Enable it to install ${entry.version}.`;
-        case 'ahead':
-            return `The catalog's ${entry.name} (${entry.version}) is older than what is installed (${record.version}). `
-                + 'Use "Downgrade" to go back.';
-        case 'not-installed':
-            return 'That plugin is not installed.';
-        default:
-            return null;
-    }
-}
-
 /**
  * Install the catalog's version over an installed copy. Refuses a pinned or
  * disabled plugin with the reason, so the screen cannot offer an update the main
@@ -895,7 +857,7 @@ export async function updateCatalogPlugin(
     if (unmanaged) return { success: false, message: unmanaged };
     const record = recordedFor(pluginId)!;
     if (!resolveUpdate(record, entry)) {
-        return { success: false, message: updateRefusal(entry, record) ?? 'There is nothing to update.' };
+        return { success: false, message: installRefusal(entry, record) ?? 'There is nothing to update.' };
     }
     return await installOverInstalled(entry, { verb: 'Updated', onProgress: options.onProgress });
 }
@@ -1131,13 +1093,21 @@ export async function uninstallCatalogPlugin(id: unknown, deleteData: boolean): 
         console.error('[plugins] could not remove the plugin', e);
         return { success: false, message: e instanceof InstallError ? e.message : `${name} could not be removed.` };
     }
+    // The files are already gone, so a record that will not drop cannot be
+    // repaired by refusing: it is reported instead, because a row that still
+    // claims an installed version offers operations that can only fail.
+    let recordStale = false;
     try {
         await updateInstalledState(installedStateDir(), (records) => { records.delete(pluginId); }, new Date().toISOString());
     } catch (e) {
         console.error('[plugins] could not update the installed-state record', e);
+        recordStale = true;
     }
     catalogBusy = false;
     let message = `Removed ${name}.`;
+    if (recordStale) {
+        message += ' Its record could not be updated, so this plugin may still be listed as installed.';
+    }
     if (deleteData) {
         const removed = deletePluginData(pluginId);
         message += removed.length

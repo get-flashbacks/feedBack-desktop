@@ -27,12 +27,14 @@ const {
     compareVersions,
     downgradeCandidates,
     entryForPin,
+    installRefusal,
     isUpdateAvailable,
     lifecycleView,
     nextRecordAfterInstall,
     pluginIdFrom,
     recordAfterPinChange,
     resolveUpdate,
+    splitLifecycleRequests,
     updateCandidates,
     updateStatusFor,
     userDataPathsForPlugin,
@@ -163,6 +165,58 @@ test('only an available or re-cut archive resolves to something installable', ()
     assert.deepStrictEqual(resolveUpdate(behind, catalogEntry()), catalogEntry());
     assert.strictEqual(resolveUpdate(record(), catalogEntry()), null, 'current installs nothing');
     assert.strictEqual(resolveUpdate(null, catalogEntry()), null);
+});
+
+test('the catalog version is refused over a copy that is pinned, disabled, current or ahead', () => {
+    const entry = catalogEntry();
+    assert.strictEqual(installRefusal(entry, record({ version: '1.0.0' })), null, 'available installs');
+    assert.strictEqual(
+        installRefusal(entry, record({ commit: 'f'.repeat(40) })),
+        null,
+        'a release re-cut under the same version installs',
+    );
+
+    assert.match(installRefusal(entry, record({ version: '1.2.0' })), /already up to date/);
+    assert.match(installRefusal(entry, record({ version: '1.0.0', pinned: true })), /pinned at 1\.0\.0.*Unpin/);
+    assert.match(installRefusal(entry, record({ version: '1.0.0', enabled: false })), /disabled.*Enable it/);
+    // The catalog is behind the installed copy, so installing it is a downgrade —
+    // which only ever reinstalls a pin from the record's own history.
+    assert.match(
+        installRefusal(entry, record({ version: '1.3.0' })),
+        /1\.2\.0\) is older than what is installed \(1\.3\.0\).*Downgrade/,
+    );
+});
+
+test('a batch install refuses exactly what the per-plugin operation would', () => {
+    const CATALOG_DIGEST = '9'.repeat(64);
+    const entries = ['metronome', 'pinned', 'disabled', 'ahead', 'current', 'catalogBehind', 'fresh', 'unknown'].map(id =>
+        catalogEntry({ id, installDir: id, name: id, version: '2.0.0', archiveSha256: CATALOG_DIGEST }),
+    );
+    const records = new Map([
+        ['metronome', record({ version: '1.0.0' })],
+        ['pinned', record({ version: '1.0.0', pinned: true })],
+        ['disabled', record({ version: '1.0.0', enabled: false })],
+        ['ahead', record({ version: '9.0.0' })],
+        ['current', record({ version: '2.0.0', archiveSha256: CATALOG_DIGEST })],
+        ['catalogBehind', record({ version: '3.0.0' })],
+    ]);
+
+    const split = splitLifecycleRequests(
+        ['metronome', 'pinned', 'disabled', 'ahead', 'current', 'catalogBehind', 'fresh', 'unknown'],
+        records,
+        entries,
+    );
+    // Selecting a plugin in the catalog list must not be a way around the rule the
+    // Update button obeys, so a copy the catalog is behind is refused here too —
+    // and an id the catalog has no entry for is left for the batch to report.
+    assert.deepStrictEqual(split.allowed, ['metronome', 'fresh', 'unknown']);
+    assert.deepStrictEqual(split.refused.map(r => r.id), ['pinned', 'disabled', 'ahead', 'current', 'catalogBehind']);
+    for (const refusal of split.refused) {
+        assert.strictEqual(refusal.success, false);
+        assert.ok(refusal.message.length > 0, refusal.id);
+    }
+    assert.match(split.refused.find(r => r.id === 'ahead').message, /Downgrade/);
+    assert.deepStrictEqual(splitLifecycleRequests([], records, entries), { allowed: [], refused: [] });
 });
 
 test('an update check offers only installed plugins that may actually update', () => {

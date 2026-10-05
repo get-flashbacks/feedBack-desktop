@@ -737,6 +737,43 @@ test('a symlinked disabled root is refused instead of parking a copy somewhere e
     assert.ok(!fs.existsSync(path.join(outside, 'example')), 'nothing was written through the link');
 });
 
+test('a symlinked disabled root is refused on enable too, not moved in from outside', async () => {
+    const { pluginsDir } = await installed();
+    const live = path.join(pluginsDir, 'example');
+    const outside = tmpDir();
+    // The parked copy really is outside the plugins root, reachable only through
+    // the link: lstat on the slot itself resolves the root as an ordinary parent,
+    // so nothing short of checking the root would notice.
+    fs.mkdirSync(path.join(outside, 'example'), { recursive: true });
+    fs.writeFileSync(path.join(outside, 'example', 'plugin.json'), JSON.stringify({ id: 'example' }));
+    fs.rmSync(live, { recursive: true });
+    fs.symlinkSync(outside, path.join(pluginsDir, installer.DISABLED_DIR));
+
+    await assert.rejects(installer.enablePlugin(pluginsDir, 'example'), /not usable/);
+    assert.ok(!fs.existsSync(live), 'nothing was moved into the backend-scanned slot');
+    assert.ok(fs.existsSync(path.join(outside, 'example', 'plugin.json')), 'the outside copy is untouched');
+});
+
+test('removing a copy through a symlinked root is refused, and what it points at survives', async () => {
+    for (const root of [installer.DISABLED_DIR, installer.BACKUP_DIR]) {
+        const s = await installed();
+        await updateTo(s, '2.0.0');
+        // One of the two installer-owned roots the removal writes through is a
+        // link to a directory outside the plugins root. rmSync follows every path
+        // component but the last, so without a check this deletes what it points
+        // at rather than the plugin's own copy.
+        const outside = tmpDir();
+        fs.mkdirSync(path.join(outside, 'example'), { recursive: true });
+        fs.writeFileSync(path.join(outside, 'example', 'plugin.json'), JSON.stringify({ id: 'example' }));
+        fs.rmSync(path.join(s.pluginsDir, root), { recursive: true, force: true });
+        fs.symlinkSync(outside, path.join(s.pluginsDir, root));
+
+        assert.throws(() => installer.removePluginSource(s.pluginsDir, 'example'), /not usable/, root);
+        assert.ok(fs.existsSync(path.join(outside, 'example', 'plugin.json')), `nothing outside was deleted (${root})`);
+        assert.ok(fs.existsSync(path.join(s.pluginsDir, 'example', 'plugin.json')), `the live copy stays (${root})`);
+    }
+});
+
 test('a squatted disabled slot never passes for a parked plugin', async () => {
     const outside = tmpDir();
     for (const squat of [
