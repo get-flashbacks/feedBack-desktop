@@ -16,6 +16,12 @@
     const listContainer = $('pm-list');
     const refreshBtn = $('pm-refresh');
 
+    // Escape before interpolating into innerHTML — this renderer runs with
+    // webSecurity:false, and extraNote can carry a main-process error string.
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+
     function showMessage(msg, success) {
         installMsg.textContent = msg;
         installMsg.className = `mt-2 text-sm ${success ? 'text-emerald-400' : 'text-red-400'}`;
@@ -109,16 +115,182 @@
     // Refresh
     refreshBtn.addEventListener('click', refreshList);
 
+    // ── Curated plugin catalog ────────────────────────────────────────────
+    // Same catalog the first-run setup wizard offers, so everything stays
+    // reachable after onboarding (issue #5).
+    const wizard = window.feedBackDesktop?.pluginWizard;
+    const catalogBox = $('pm-catalog');
+    const catalogInstallBtn = $('pm-catalog-install');
+    const catalogCancelBtn = $('pm-catalog-cancel');
+    const catalogProgressWrap = $('pm-catalog-progress-wrap');
+    const catalogProgress = $('pm-catalog-progress');
+    const catalogProgressText = $('pm-catalog-progress-text');
+    const catalogMsg = $('pm-catalog-msg');
+    const catalogSelection = new Set();
+    const catalogState = new Map(); // id -> {received, total}
+    let catalogBusy = false;
+
+    function showCatalogMessage(msg, success) {
+        if (!catalogMsg) return;
+        catalogMsg.textContent = msg;
+        catalogMsg.className = `mt-2 text-sm ${success ? 'text-emerald-400' : 'text-red-400'}`;
+        catalogMsg.classList.remove('hidden');
+    }
+
+    function renderCatalogProgress(name, percent) {
+        if (!catalogProgressWrap) return;
+        catalogProgressWrap.classList.remove('hidden');
+        catalogProgress.value = percent;
+        catalogProgressText.textContent = percent >= 100
+            ? `${name} — installed.`
+            : `${name} — downloading… ${percent}%`;
+    }
+
+    function setCatalogBusy(busy) {
+        catalogBusy = busy;
+        catalogInstallBtn.disabled = busy;
+        catalogInstallBtn.textContent = busy ? 'Installing…' : 'Install selected';
+        catalogCancelBtn.classList.toggle('hidden', !busy);
+    }
+
+    async function refreshCatalog() {
+        if (!catalogBox) return;
+        try {
+            const catalog = await plugins.catalog();
+            if (!Array.isArray(catalog) || catalog.length === 0) {
+                catalogBox.innerHTML = '<div class="text-sm text-slate-500 italic">No catalog plugins are available in this build.</div>';
+                return;
+            }
+            catalogBox.innerHTML = '';
+            for (const entry of catalog) {
+                const selection = entry.selection || {};
+                // An entry with a different installed version is an upgrade, not
+                // a reinstall: the batch installer swaps it in with a backup slot.
+                const outdated = !!entry.installedVersion && entry.installedVersion !== entry.version;
+                const installable = !entry.installedVersion || outdated;
+                const row = document.createElement('label');
+                row.className = `flex items-start gap-3 p-3 rounded border ${!installable ? 'bg-emerald-900/20 border-emerald-800' : 'bg-slate-800/50 border-slate-700'}`;
+
+                const box = document.createElement('input');
+                box.type = 'checkbox';
+                box.className = 'mt-1 accent-emerald-500';
+                box.checked = catalogSelection.has(entry.id);
+                // Essentials ship with the app, and bundled entries ship with the
+                // app too — the installer refuses to place a second copy.
+                box.disabled = !installable || entry.bundled || selection.tier === 'essential';
+                box.addEventListener('change', () => {
+                    if (box.checked) catalogSelection.add(entry.id);
+                    else catalogSelection.delete(entry.id);
+                    updateInstallLabel();
+                });
+
+                const meta = document.createElement('div');
+                meta.className = 'flex-1 min-w-0';
+                meta.innerHTML = `
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-medium text-slate-200">${esc(entry.name)}</span>
+                        <span class="text-xs text-slate-500">v${esc(entry.version)}</span>
+                        ${selection.tier === 'essential' ? '<span class="text-xs text-sky-300">Essential</span>' : ''}
+                        ${entry.bundled ? '<span class="text-xs text-sky-300">Included</span>' : ''}
+                        ${entry.installedVersion ? `<span class="text-xs text-emerald-400">Installed v${esc(entry.installedVersion)}${outdated ? ' — update available' : ''}</span>` : ''}
+                        ${entry.canRollback ? '<span class="text-xs text-amber-300">Previous version available</span>' : ''}
+                    </div>
+                    <div class="text-xs text-slate-400 mt-0.5">${esc(entry.description || '')}</div>
+                    <div class="text-xs text-slate-500 mt-0.5">
+                        ${esc(entry.category || '')}${Array.isArray(entry.instruments) && entry.instruments.length ? ' · ' + esc(entry.instruments.join(', ')) : ''}
+                        ${entry.size ? ' · ' + Math.max(1, Math.round(entry.size.downloadBytes / 1024)) + ' KB' : ''}
+                    </div>
+                `;
+
+                row.appendChild(box);
+                row.appendChild(meta);
+
+                if (entry.canRollback) {
+                    const restore = document.createElement('button');
+                    restore.className = 'text-xs px-2 py-1 rounded bg-amber-600/50 hover:bg-amber-500 self-center';
+                    restore.textContent = 'Restore previous';
+                    restore.addEventListener('click', async () => {
+                        restore.disabled = true;
+                        const res = await plugins.rollbackCatalog(entry.id);
+                        showCatalogMessage(res.message, res.success);
+                        await refreshCatalog();
+                    });
+                    row.appendChild(restore);
+                }
+
+                catalogBox.appendChild(row);
+            }
+            updateInstallLabel();
+        } catch (e) {
+            catalogBox.innerHTML = `<div class="text-sm text-red-400">Error loading the plugin catalog: ${esc(e.message)}</div>`;
+        }
+    }
+
+    function updateInstallLabel() {
+        const count = catalogSelection.size;
+        catalogInstallBtn.textContent = count
+            ? `Install selected (${count})`
+            : 'Install selected';
+    }
+
+    if (catalogInstallBtn) {
+        catalogInstallBtn.addEventListener('click', async () => {
+            const ids = [...catalogSelection];
+            if (!ids.length) {
+                showCatalogMessage('Select at least one plugin to install.', false);
+                return;
+            }
+            setCatalogBusy(true);
+            showCatalogMessage('', true);
+            const unsubscribe = plugins.onInstallProgress((progress) => {
+                const state = catalogState.get(progress.id) || { received: 0, total: 0 };
+                if (progress.totalBytes) state.total = progress.totalBytes;
+                if (progress.receivedBytes !== undefined) state.received = progress.receivedBytes;
+                catalogState.set(progress.id, state);
+                const percent = state.total ? Math.round((state.received / state.total) * 100) : 0;
+                renderCatalogProgress(progress.name, percent);
+            });
+            try {
+                const result = await plugins.installCatalog(ids);
+                const failed = Array.isArray(result.results) ? result.results.filter(r => !r.success) : [];
+                for (const item of failed) showCatalogMessage(item.message, false);
+                if (!failed.length) showCatalogMessage(result.message, result.success);
+                catalogSelection.clear();
+                await refreshCatalog();
+                await refreshList();
+            } catch (e) {
+                showCatalogMessage('Error: ' + (e.message || e), false);
+            } finally {
+                unsubscribe();
+                catalogState.clear();
+                catalogProgressWrap.classList.add('hidden');
+                setCatalogBusy(false);
+            }
+        });
+    }
+
+    if (catalogCancelBtn) {
+        catalogCancelBtn.addEventListener('click', async () => {
+            const res = await plugins.cancelCatalogInstall();
+            showCatalogMessage(res.message, res.success);
+        });
+    }
+
+    if ($('pm-wizard-btn') && wizard) {
+        $('pm-wizard-btn').addEventListener('click', async () => {
+            const res = await wizard.open();
+            if (!res || res.success === false) {
+                showCatalogMessage('The setup wizard could not be opened.', false);
+            }
+        });
+    }
+
+    refreshCatalog();
+
     // ── LAN access toggle ───────────────────────────────────────────────
     const network = window.feedBackDesktop?.network;
     const lanToggle = $('pm-lan-toggle');
     const lanStatus = $('pm-lan-status');
-
-    // Escape before interpolating into innerHTML — this renderer runs with
-    // webSecurity:false, and extraNote can carry a main-process error string.
-    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    ));
 
     function renderLanStatus(enabled, urls, extraNote) {
         if (!lanStatus) return;

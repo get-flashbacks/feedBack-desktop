@@ -706,3 +706,116 @@ test('commitInstall silently ignores names outside the catalog install-dir patte
     // plugins:remove passes any safe directory name, including ones with dashes.
     for (const name of ['my-plugin', '..', 'a/b', '']) assert.doesNotThrow(() => installer.commitInstall(root, name), name);
 });
+
+// ── Progress + cancellation (issue #5: wizard download with progress/cancel) ──
+
+test('progress reports byte ticks and terminal phases for every batch item', async () => {
+    const { pluginsDir, catalog, fetch } = batchSetup();
+    const events = [];
+    await installer.installCatalogBatch(['alpha', 'beta'], catalog, {
+        pluginsDir,
+        fetch,
+        installedIds: new Set(),
+        onProgress: (event) => events.push(event),
+    });
+    const alpha = catalog.byId.get('alpha');
+    const alphaEvents = events.filter(e => e.id === 'alpha');
+    assert.strictEqual(alphaEvents[0].phase, 'start');
+    assert.strictEqual(alphaEvents[0].totalBytes, alpha.size.downloadBytes);
+    const lastTick = alphaEvents.filter(e => e.phase === 'download').pop();
+    assert.strictEqual(lastTick.receivedBytes, alpha.size.downloadBytes);
+    assert.strictEqual(lastTick.totalBytes, alpha.size.downloadBytes);
+    assert.strictEqual(alphaEvents[alphaEvents.length - 1].phase, 'installed');
+    // beta's archive is tampered with, so it ends as a failure — and a failing
+    // listener must never break the batch.
+    assert.strictEqual(events.filter(e => e.id === 'beta').pop().phase, 'failed');
+});
+
+test('a throwing progress listener cannot fail an install', async () => {
+    const { pluginsDir, catalog, fetch } = batchSetup();
+    const results = await installer.installCatalogBatch(['alpha'], catalog, {
+        pluginsDir,
+        fetch,
+        installedIds: new Set(),
+        onProgress: () => { throw new Error('renderer went away'); },
+    });
+    assert.strictEqual(results[0].success, true);
+});
+
+test('cancelling during a download stops the batch and installs nothing', async () => {
+    const { pluginsDir, catalog } = batchSetup();
+    const controller = new AbortController();
+    const fetched = [];
+    const fetchImpl = async (url) => {
+        fetched.push(url);
+        const entry = catalog.entries.find(e => installer.archiveUrlFor(e) === url);
+        return {
+            ok: true,
+            status: 200,
+            url,
+            headers: { get: () => null },
+            body: (async function* () {
+                yield entry._zip.subarray(0, 10);
+                controller.abort();          // the user pressed Cancel mid-download
+                yield entry._zip.subarray(10);
+            })(),
+        };
+    };
+    const events = [];
+    const results = await installer.installCatalogBatch(['alpha', 'beta'], catalog, {
+        pluginsDir,
+        fetch: fetchImpl,
+        installedIds: new Set(),
+        signal: controller.signal,
+        onProgress: (event) => events.push(event),
+    });
+    assert.strictEqual(results.length, 2);
+    for (const result of results) {
+        assert.strictEqual(result.success, false);
+        assert.match(result.message, /cancelled/);
+    }
+    assert.strictEqual(events.filter(e => e.phase === 'cancelled').length, 2);
+    // beta was never even fetched: the cancel is checked between items too.
+    assert.strictEqual(fetched.length, 1);
+    assert.ok(!fs.existsSync(path.join(pluginsDir, 'alpha')));
+    assert.ok(!fs.existsSync(path.join(pluginsDir, 'beta')));
+});
+
+test('a cancel mid-batch still activates what already landed, exactly once', async () => {
+    const { pluginsDir, catalog } = batchSetup();
+    const controller = new AbortController();
+    let activated = null;
+    let activations = 0;
+    const fetchImpl = async (url) => {
+        const entry = catalog.entries.find(e => installer.archiveUrlFor(e) === url);
+        const isBeta = entry.id === 'beta';
+        return {
+            ok: true,
+            status: 200,
+            url,
+            headers: { get: () => null },
+            body: (async function* () {
+                yield entry._zip.subarray(0, 10);
+                if (isBeta) controller.abort();
+                yield entry._zip.subarray(10);
+            })(),
+        };
+    };
+    const results = await installer.installCatalogBatch(['alpha', 'beta'], catalog, {
+        pluginsDir,
+        fetch: fetchImpl,
+        installedIds: new Set(),
+        signal: controller.signal,
+        activate: async (outcomes) => {
+            activations++;
+            activated = outcomes.map(o => o.id);
+            return new Map(outcomes.map(o => [o.id, { ok: true, confirmed: true }]));
+        },
+    });
+    assert.strictEqual(activations, 1);
+    assert.deepStrictEqual(activated, ['alpha']);
+    assert.strictEqual(results.find(r => r.id === 'alpha').success, true);
+    assert.strictEqual(results.find(r => r.id === 'beta').success, false);
+    assert.ok(fs.existsSync(path.join(pluginsDir, 'alpha', 'plugin.json')));
+    assert.ok(!fs.existsSync(path.join(pluginsDir, 'beta')));
+});

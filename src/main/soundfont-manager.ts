@@ -52,6 +52,19 @@ interface DesktopConfig {
     // the renderer's localStorage because localStorage is shared with the pane
     // windows themselves (same origin), and a second writer there would race.
     paneWindows?: Record<string, SavedPaneWindow>;
+    // First-run guided plugin selection (issue #5). `completed` is set once the
+    // wizard has been finished OR explicitly skipped — either way the user is
+    // not asked again on the next launch. `pendingIds` is the selection a
+    // cancelled/failed run still owes, so reopening the wizard resumes exactly
+    // those plugins instead of starting over (already-installed ones are
+    // skipped by the install path, so a resume never reinstalls them). What
+    // each field means, and which close counts as a decision, lives in
+    // plugin-setup-state.ts.
+    pluginSetup?: {
+        completed?: boolean;
+        completedAt?: string;
+        pendingIds?: string[];
+    };
 }
 
 export interface SavedPaneWindow {
