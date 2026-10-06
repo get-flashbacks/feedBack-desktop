@@ -52,8 +52,10 @@ an application resource so a distributed build can be audited later.
 process; `src/main/plugin-archive.ts` is its dependency-free ZIP reader. The
 renderer reaches it through `window.feedBackDesktop.plugins`:
 
-- `catalog()` — catalog entries plus `installedVersion`, `bundled`, and
-  `canRollback` for each.
+- `catalog()` — `{ ok, entries, message? }`, where each entry carries
+  `installedVersion`, `bundled`, and `canRollback`. `ok: false` means the
+  bundled catalog file is missing or unreadable, which the catalog view shows
+  as an error rather than as an empty catalog.
 - `installCatalog(ids)` — install a batch by catalog id.
 - `rollbackCatalog(id)` — restore the version kept in the backup slot.
 - `onInstallProgress(cb)` — progress ticks of the in-flight batch, broadcast to

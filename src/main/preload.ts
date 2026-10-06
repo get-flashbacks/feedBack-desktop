@@ -518,7 +518,11 @@ const feedBackDesktopApi = {
         listInstalled: () => ipcRenderer.invoke('plugins:listInstalled'),
         // Curated catalog (no Git required): list entries with install state,
         // install a batch by id (one backend restart), restore a backup.
-        catalog: () => ipcRenderer.invoke('plugins:catalog'),
+        // catalog() answers { ok, entries, message? } — `ok: false` means the
+        // bundled catalog file is missing or unreadable, which the catalog view
+        // must show as an error rather than as an empty catalog.
+        catalog: (): Promise<{ ok: boolean; entries: unknown[]; message?: string }> =>
+            ipcRenderer.invoke('plugins:catalog'),
         installCatalog: (ids: string[]) => ipcRenderer.invoke('plugins:installCatalog', ids),
         rollbackCatalog: (id: string) => ipcRenderer.invoke('plugins:rollbackCatalog', id),
         // Progress of the in-flight catalog batch (broadcast to every window),
