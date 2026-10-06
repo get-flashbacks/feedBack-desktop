@@ -29,6 +29,55 @@
         setTimeout(() => installMsg.classList.add('hidden'), 5000);
     }
 
+    // A git-installed plugin's metadata comes from the plugin.json of whatever
+    // repository the user cloned, so the name and description are attacker-chosen
+    // text. They go in as textContent and the buttons carry their target in
+    // `dataset`, so nothing here ever becomes markup — this renderer runs with
+    // webSecurity:false, so a stray `<` would execute rather than being inert.
+    function installedRow(plugin) {
+        const div = document.createElement('div');
+        div.className = 'flex items-center gap-3 p-3 rounded bg-slate-800/50 border border-slate-700';
+
+        const meta = document.createElement('div');
+        meta.className = 'flex-1';
+
+        const name = document.createElement('div');
+        name.className = 'text-sm font-medium text-slate-200';
+        name.textContent = plugin.manifest?.name || plugin.name;
+
+        const desc = document.createElement('div');
+        desc.className = 'text-xs text-slate-400';
+        desc.textContent = plugin.manifest?.description || '';
+
+        const version = document.createElement('div');
+        version.className = 'text-xs text-slate-500 mt-0.5';
+        version.textContent = 'v' + (plugin.version || 'unknown');
+
+        meta.appendChild(name);
+        meta.appendChild(desc);
+        meta.appendChild(version);
+        div.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'flex gap-2';
+        if (plugin.hasGit) {
+            actions.appendChild(installedAction('pm-update text-xs px-2 py-1 rounded bg-blue-600 hover:bg-blue-500', plugin.name, 'Update'));
+        }
+        actions.appendChild(installedAction('pm-remove text-xs px-2 py-1 rounded bg-red-600/50 hover:bg-red-500', plugin.name, 'Remove'));
+        div.appendChild(actions);
+
+        return div;
+    }
+
+    function installedAction(className, name, label) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = className;
+        button.textContent = label;
+        button.dataset.name = name;
+        return button;
+    }
+
     async function refreshList() {
         listContainer.innerHTML = '<div class="text-sm text-slate-500">Loading...</div>';
 
@@ -42,25 +91,7 @@
 
             listContainer.innerHTML = '';
             for (const plugin of installed) {
-                const div = document.createElement('div');
-                div.className = 'flex items-center gap-3 p-3 rounded bg-slate-800/50 border border-slate-700';
-
-                const name = plugin.manifest?.name || plugin.name;
-                const desc = plugin.manifest?.description || '';
-                const version = plugin.version || 'unknown';
-
-                div.innerHTML = `
-                    <div class="flex-1">
-                        <div class="text-sm font-medium text-slate-200">${name}</div>
-                        <div class="text-xs text-slate-400">${desc}</div>
-                        <div class="text-xs text-slate-500 mt-0.5">v${version}</div>
-                    </div>
-                    <div class="flex gap-2">
-                        ${plugin.hasGit ? `<button class="pm-update text-xs px-2 py-1 rounded bg-blue-600 hover:bg-blue-500" data-name="${plugin.name}">Update</button>` : ''}
-                        <button class="pm-remove text-xs px-2 py-1 rounded bg-red-600/50 hover:bg-red-500" data-name="${plugin.name}">Remove</button>
-                    </div>
-                `;
-                listContainer.appendChild(div);
+                listContainer.appendChild(installedRow(plugin));
             }
 
             // Bind update buttons
@@ -85,7 +116,13 @@
                 });
             });
         } catch (e) {
-            listContainer.innerHTML = `<div class="text-sm text-red-400">Error loading plugins: ${e.message}</div>`;
+            const error = document.createElement('div');
+            error.className = 'text-sm text-red-400';
+            // The message comes back across the bridge from main, so it is text
+            // rather than markup here too.
+            error.textContent = 'Error loading plugins: ' + (e?.message || e);
+            listContainer.innerHTML = '';
+            listContainer.appendChild(error);
         }
     }
 
@@ -237,7 +274,7 @@
             updateInstallLabel();
             await updateCheckBadge();
         } catch (e) {
-            catalogBox.innerHTML = `<div class="text-sm text-red-400">Error loading the plugin catalog: ${esc(e.message)}</div>`;
+            catalogBox.innerHTML = `<div class="text-sm text-red-400">Error loading the plugin catalog: ${esc(e?.message || e)}</div>`;
         }
     }
 

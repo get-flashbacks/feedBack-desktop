@@ -1456,11 +1456,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const color = typeColors[slot.type] || 'slate';
             const div = document.createElement('div');
             div.className = `flex items-center gap-3 p-3 rounded bg-slate-800/50 border border-${color}-500/30`;
+            // The slot name is the user's VST/NAM/IR file name, so escape it
+            // before it becomes markup. The slot id comes from the addon's own
+            // counter rather than off disk, so the inline handlers keep it bare.
             div.innerHTML = `
                 <span class="text-xs font-medium px-2 py-0.5 rounded bg-${color}-500/20 text-${color}-400">
                     ${typeNames[slot.type] || '?'}
                 </span>
-                <span class="flex-1 text-sm ${slot.bypassed ? 'line-through text-slate-500' : 'text-slate-200'}">${slot.name}</span>
+                <span class="flex-1 text-sm ${slot.bypassed ? 'line-through text-slate-500' : 'text-slate-200'}">${escHtml(slot.name)}</span>
                 ${slot.hasEditor ? `<button class="text-xs px-2 py-1 rounded bg-blue-600/50 hover:bg-blue-500"
                         onclick="_aeOpenEditor(${slot.id})">Edit</button>` : ''}
                 <button class="text-xs px-2 py-1 rounded ${slot.bypassed ? 'bg-yellow-600' : 'bg-slate-600'} hover:opacity-80"
@@ -1520,10 +1523,13 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         for (const plugin of filtered) {
             const div = document.createElement('div');
             div.className = 'flex items-center gap-3 p-2 rounded hover:bg-slate-700/50 cursor-pointer';
+            // Name, manufacturer and format come from the scanned bundle on disk,
+            // so escape them: this window runs with webSecurity:false, which leaves
+            // no CSP to make a stray < inert.
             div.innerHTML = `
                 <div class="flex-1">
-                    <div class="text-sm text-slate-200">${plugin.name}</div>
-                    <div class="text-xs text-slate-400">${plugin.manufacturer} · ${plugin.format}</div>
+                    <div class="text-sm text-slate-200">${escHtml(plugin.name)}</div>
+                    <div class="text-xs text-slate-400">${escHtml(plugin.manufacturer)} · ${escHtml(plugin.format)}</div>
                 </div>
             `;
             div.addEventListener('click', async () => {
