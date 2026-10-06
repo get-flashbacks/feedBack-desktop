@@ -12,9 +12,10 @@
     const $ = (id) => document.getElementById(id);
 
     // Escape before interpolating into innerHTML — this renderer runs with
-    // webSecurity:false, so every catalog field and every main-process error
-    // string below goes through here first. (The git-installed list further down
-    // predates this helper and still interpolates unescaped.)
+    // webSecurity:false, so every catalog field, LAN URL and main-process error
+    // string (extraNote, catalog load errors) below goes through here first.
+    // (The git-installed list further down predates this helper and still
+    // interpolates unescaped.)
     const esc = (s) => String(s).replace(/[&<>"']/g, (c) => (
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
     ));
@@ -24,12 +25,6 @@
     const installMsg = $('pm-install-msg');
     const listContainer = $('pm-list');
     const refreshBtn = $('pm-refresh');
-
-    // Escape before interpolating into innerHTML — this renderer runs with
-    // webSecurity:false, and extraNote can carry a main-process error string.
-    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    ));
 
     function showMessage(msg, success) {
         installMsg.textContent = msg;

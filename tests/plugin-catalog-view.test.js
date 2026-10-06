@@ -138,6 +138,18 @@ function search(rows, query, overrides) {
     return ids(view.pmFilterCatalog(rows, filters({ query, ...overrides })));
 }
 
+// ── The script parses as a whole ─────────────────────────────────────
+
+test('screen.js parses as a whole, not just the four lifted functions', () => {
+    // loadView() only compiles the four lifted functions, so everything else in
+    // the IIFE — including the shared esc() helper — is unchecked here. A merge
+    // that reintroduced a duplicate `const esc` parsed fine in isolation and
+    // still threw a SyntaxError in the renderer, blanking the whole screen.
+    // Compile the file untouched: new vm.Script parses without executing, so no
+    // window or document is needed.
+    assert.doesNotThrow(() => new vm.Script(SCREEN_JS, { filename: 'screen.js' }));
+});
+
 // ── Search ───────────────────────────────────────────────────────────
 
 test('search matches names case-insensitively', () => {
