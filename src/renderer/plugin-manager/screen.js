@@ -176,6 +176,7 @@
     const catalogMsg = $('pm-catalog-msg');
     const catalogSelection = new Set();
     const catalogState = new Map(); // id -> {received, total}
+    const catalogDependencyInfo = $('pm-catalog-deps');
     let catalogBusy = false;
 
     function showCatalogMessage(msg, success) {
@@ -235,10 +236,12 @@
                 box.disabled = !installable || entry.bundled || selection.tier === 'essential' || held;
                 if (box.disabled) catalogSelection.delete(entry.id);
                 box.checked = catalogSelection.has(entry.id);
-                box.addEventListener('change', () => {
+                if (typeof updateDependencyInfo === 'function') updateDependencyInfo();
+                box.addEventListener('change', async () => {
                     if (box.checked) catalogSelection.add(entry.id);
                     else catalogSelection.delete(entry.id);
                     updateInstallLabel();
+                    await updateDependencyInfo();
                 });
 
                 const meta = document.createElement('div');
@@ -406,6 +409,36 @@
             : 'Install selected';
     }
 
+    async function updateDependencyInfo() {
+        if (!catalogDependencyInfo) return;
+        const ids = [...catalogSelection];
+        if (!ids.length) {
+            catalogDependencyInfo.classList.add('hidden');
+            catalogDependencyInfo.textContent = '';
+            return;
+        }
+        try {
+            const plan = await plugins.resolveCatalog(ids);
+            const req = plan && plan.required ? plan.required : {};
+            const added = [];
+            for (const id of ids) {
+                if (req[id] && req[id].length) {
+                    for (const d of req[id]) if (!catalogSelection.has(d) && added.indexOf(d) === -1) added.push(d);
+                }
+            }
+            if (added.length) {
+                catalogDependencyInfo.textContent = 'Automatically selected required dependencies: ' + added.join(', ') + '.';
+                catalogDependencyInfo.classList.remove('hidden');
+                return;
+            }
+            catalogDependencyInfo.classList.add('hidden');
+            catalogDependencyInfo.textContent = '';
+        } catch (e) {
+            catalogDependencyInfo.classList.add('hidden');
+            catalogDependencyInfo.textContent = '';
+        }
+    }
+
     if (catalogInstallBtn) {
         catalogInstallBtn.addEventListener('click', async () => {
             const ids = [...catalogSelection];
@@ -429,6 +462,10 @@
                 for (const item of failed) showCatalogMessage(item.message, false);
                 if (!failed.length) showCatalogMessage(result.message, result.success);
                 catalogSelection.clear();
+                if (catalogDependencyInfo) {
+                    catalogDependencyInfo.classList.add('hidden');
+                    catalogDependencyInfo.textContent = '';
+                }
                 await refreshCatalog();
                 await refreshList();
             } catch (e) {
@@ -887,6 +924,7 @@
             }
             catalogFiltersEl.querySelectorAll('input[data-facet]').forEach((input) => { input.checked = false; });
             renderCatalog();
+            if (catalogDependencyInfo) { catalogDependencyInfo.classList.add('hidden'); catalogDependencyInfo.textContent = ''; }
         });
     }
 
