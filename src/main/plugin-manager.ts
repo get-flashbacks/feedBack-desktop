@@ -302,6 +302,15 @@ function installedStateDir(): string {
     return app.getPath('userData');
 }
 
+/**
+ * The build every compatibility verdict in this file is judged against — the
+ * same shape listCatalog() uses, so the cards and the install gate cannot
+ * disagree about what fits (plugin-compat.ts is the single question).
+ */
+function compatBuild(): { coreVersion: string; pluginApiVersion: string } {
+    return { coreVersion: app.getVersion(), pluginApiVersion: PLUGIN_API_VERSION };
+}
+
 /** The recorded lifecycle state of every catalog install, keyed by plugin id. */
 function recordedState(): Map<string, InstalledPluginRecord> {
     return readInstalledState(installedStateDir()).plugins;
@@ -510,10 +519,47 @@ export interface CatalogInstallOptions {
     signal?: AbortSignal;
 }
 
+/** Shape of the promise installFromCatalog answers — results are batch items. */
+export interface CatalogInstallResult {
+    success: boolean;
+    message: string;
+    results: unknown[];
+    /** Set when every fix is reconnecting; the renderer says so instead of "failed". */
+    networkRequired?: boolean;
+}
+
+/**
+ * Split a request into entries this build can run and ones it cannot, with the
+ * compatibility reason in place of a download. The install gate asks the same
+ * compatibilityFor() question the cards ask, so a plugin the backend cannot
+ * load is refused before the network is touched — the actionable explanation
+ * the cards show is enforced where the installs happen, not only drawn.
+ */
+function refuseIncompatible(
+    ids: string[],
+    catalog: Catalog,
+): { allowed: string[]; refused: Array<{ id: string; name: string; success: false; message: string; networkRequired?: boolean }> } {
+    const allowed: string[] = [];
+    const refused: Array<{ id: string; name: string; success: false; message: string; networkRequired?: boolean }> = [];
+    const build = compatBuild();
+    for (const id of ids) {
+        const entry = catalog.byId.get(id);
+        // An id outside the catalog is left for the batch to report by name —
+        // that is a bogus request, not an incompatibility.
+        const verdict = entry ? compatibilityFor(entry, build) : null;
+        if (verdict && verdict.ok === false) {
+            refused.push({ id, name: entry!.name, success: false, message: verdict.reason ?? `${entry!.name} does not fit this build.` });
+        } else {
+            allowed.push(id);
+        }
+    }
+    return { allowed, refused };
+}
+
 export async function installFromCatalog(
     ids: unknown,
     options: CatalogInstallOptions = {},
-): Promise<{ success: boolean; message: string; results: unknown[] }> {
+): Promise<CatalogInstallResult> {
     if (!Array.isArray(ids) || ids.length === 0) {
         return { success: false, message: 'Select at least one plugin to install.', results: [] };
     }
@@ -545,8 +591,11 @@ export async function installFromCatalog(
         // catalog list must not be a way around "leave this version alone". A copy
         // the catalog is behind is refused for the same reason: that install is a
         // downgrade, and a downgrade only reinstalls a pin from the record.
-        const { allowed, refused } = splitLifecycleRequests(ids as string[], recordedState(), catalog.entries);
-        const results = await installCatalogBatch(allowed, catalog, {
+        const lifecycle = splitLifecycleRequests(ids as string[], recordedState(), catalog.entries);
+        // An entry this build cannot run is refused before the network is
+        // touched, with the same reason the card shows.
+        const compatible = refuseIncompatible(lifecycle.allowed, catalog);
+        const results = await installCatalogBatch(compatible.allowed, catalog, {
             pluginsDir,
             fetch: fetch as unknown as FetchLike,
             protectedIds: bundledBaselineIds(core),
@@ -556,7 +605,9 @@ export async function installFromCatalog(
             onProgress,
             signal: options.signal ?? controller.signal,
         });
-        const all = [...refused, ...results];
+        const all = [...lifecycle.refused, ...compatible.refused, ...results];
+        const networked = all.filter(r => r.networkRequired === true).length === all.filter(r => !r.success).length
+            && all.some(r => !r.success && r.networkRequired === true);
         const failed = all.filter(r => !r.success).length;
         const cancelled = controller.signal.aborted;
         // Record what actually landed, before reporting: a plugin the batch
@@ -571,11 +622,21 @@ export async function installFromCatalog(
             : failed === 0
                 ? `Installed ${all.length} plugin${all.length === 1 ? '' : 's'}.`
                 : `${all.length - failed} of ${all.length} plugin${all.length === 1 ? '' : 's'} installed.`;
-        return { success: failed === 0 && !cancelled, message, results: all };
+        return {
+            success: failed === 0 && !cancelled,
+            message,
+            results: all,
+            ...(networked ? { networkRequired: true } : {}),
+        };
     } catch (e) {
         console.error('[plugins] catalog install failed', e);
         const message = e instanceof InstallError ? e.message : 'Plugin installation failed.';
-        return { success: false, message, results: [] };
+        return {
+            success: false,
+            message,
+            results: [],
+            ...(e instanceof InstallError && e.networkRequired ? { networkRequired: true } : {}),
+        };
     } finally {
         catalogAbort = null;
         catalogBusy = false;
@@ -603,22 +664,39 @@ export function listCatalog(): { ok: boolean; entries: unknown[]; message?: stri
     const pluginsDir = getPluginsDir();
     const overrides = scanPluginCopies(pluginsDir);
     const baselines = scanPluginCopies(getCorePluginsDir());
+    const records = recordedState();
     // One compatibility answer per row, decided here rather than in the
     // renderer: the desktop ships the core, so its own version is the core
     // build every entry is judged against (see plugin-compat.ts).
-    const build = { coreVersion: app.getVersion(), pluginApiVersion: PLUGIN_API_VERSION };
+    const build = compatBuild();
     return {
         ok: true,
         entries: catalog.entries.map(entry => {
             const baseline = baselines.get(entry.id) ?? null;
             const override = overrides.get(entry.id) ?? null;
+            const record = records.get(entry.id) ?? null;
+            // A copy that is parked on disk is disabled (the directory is what
+            // the backend sees), and a disabled copy has no backup to restore:
+            // disabling dropped it, so "restore previous" must not offer a
+            // version from before the state the user chose.
+            const disabled = isPluginDisabled(pluginsDir, entry.installDir);
+            const view = lifecycleView({
+                entry,
+                record,
+                disabled,
+                canRollback: !disabled && hasBackup(pluginsDir, entry.installDir),
+            });
             return {
                 ...entry,
+                ...view,
                 compat: compatibilityFor(entry, build),
-                installedVersion: override?.version ?? null,
+                // The override's manifest version is what is on disk; the
+                // record's is what the lifecycle acts on. They agree once every
+                // install is recorded, and when they do not, the copy on disk is
+                // the one the user is looking at.
+                installedVersion: override?.version ?? view.installedVersion,
                 bundled: baseline?.bundled === true,
                 activeSource: activeSourceFor(baseline, override),
-                canRollback: hasBackup(pluginsDir, entry.installDir),
             };
         }),
     };
@@ -677,6 +755,13 @@ export interface CatalogInstallPlan {
     outstanding: string[];
     /** What the conflict pass pruned on the way: kept/dropped pairs, plus the cascade. */
     conflicts: SelectionPlan['conflicts'];
+    /**
+     * Pinned size of what the batch will actually fetch, so the screen can show
+     * the final set's cost before anything is downloaded. Entries already on
+     * disk (or bundled with the app) are in the set but never transferred, and
+     * stay out of this figure — see plugin-selection.ts.
+     */
+    downloadBytes: number;
 }
 
 /**
@@ -708,6 +793,7 @@ export function planCatalogInstall(rawIds: unknown): CatalogInstallPlan {
             ...plan.conflicts.filter(c => !resolved.ids.includes(c.dropped)),
             ...resolved.conflicts,
         ],
+        downloadBytes: resolved.downloadBytes,
     };
 }
 
@@ -1147,7 +1233,7 @@ export function initPluginManager(getWindow: () => BrowserWindow | null = () => 
             }
         };
         for (const id of plan.ids) visit(id);
-        return { ids: plan.ids, outstanding: plan.outstanding, required, conflicts: plan.conflicts };
+        return { ids: plan.ids, outstanding: plan.outstanding, required, conflicts: plan.conflicts, downloadBytes: plan.downloadBytes };
     });
 
     ipcMain.handle('plugins:installCatalog', async (_event, ids: unknown) => {

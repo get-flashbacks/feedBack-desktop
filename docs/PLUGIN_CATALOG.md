@@ -56,15 +56,30 @@ renderer reaches it through `window.feedBackDesktop.plugins`:
   `installedVersion` (the version of any user-installed copy, `null` when only
   the packaged copy exists), `bundled` (the packaged copy is a bundled
   baseline), `activeSource` (which copy the backend loads — `bundled`,
-  `writable-override`, `installed`, or `none`), `canRollback`, and `compat`
+  `writable-override`, `installed`, or `none`), `canRollback`, `compat`
   (the entry's declared `compatibility` bounds judged against this build by
-  `src/main/plugin-compat.ts`): `{ ok, requirements, reason }`, where
+  `src/main/plugin-compat.ts`: `{ ok, requirements, reason }`, where
   `requirements` is the display phrase for the bounds ("fee[dB]ack core 0.3.0
   or newer, plugin API 1 or newer") and a per-entry `compat.ok: false` with its
-  `reason` says why the entry does not fit this build. The top-level `ok: false`
-  means the bundled catalog file is missing or unreadable, which the catalog
-  view shows as an error rather than as an empty catalog.
-- `installCatalog(ids)` — install a batch by catalog id.
+  `reason` says why the entry does not fit this build), and the lifecycle view
+  of `src/main/plugin-lifecycle.ts` (`installed`, `enabled`, `pinned`,
+  `updateStatus`, `updateAvailable`, `downgradeVersions`, `disabled`) that the
+  per-plugin controls render from. The top-level `ok: false` means the bundled
+  catalog file is missing or unreadable, which the catalog view shows as an
+  error rather than as an empty catalog.
+- `resolveCatalog(ids)` — the resolved installation set for the current
+  selection, before anything is downloaded: `{ ids, outstanding, required,
+  conflicts, downloadBytes }`, where `ids` is the final set in install order
+  (dependencies first), `required` names which entry pulled each dependency in,
+  `conflicts` reports what the conflict pass pruned, and `downloadBytes` is the
+  pinned transfer size of `outstanding`.
+- `installCatalog(ids)` — install a batch by catalog id. Entries whose
+  `compat` verdict is `ok: false` are refused (with that reason) before any
+  download, as are copies the recorded state forbids touching (pinned,
+  disabled, or behind the catalog). The answer is `{ success, message,
+  results, networkRequired? }`; `networkRequired` is set when the failures are
+  connectivity-shaped, so the UI reports "a connection is required" and keeps
+  the selection for a retry instead of presenting a broken install.
 - `rollbackCatalog(id)` — restore the version kept in the backup slot.
 - `onInstallProgress(cb)` — progress ticks of the in-flight batch, broadcast to
   every window, so the setup wizard and this screen can drive the same bar.
