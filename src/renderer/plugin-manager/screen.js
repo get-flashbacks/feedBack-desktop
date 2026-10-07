@@ -522,10 +522,11 @@
 
     // ── Plugin catalog: read-only browsing ─────────────────────────────
     //
-    // pmCatalogState, pmCatalogHaystack, pmCatalogFacets and pmFilterCatalog
-    // carry the pm prefix because they are deliberately free of any reference
-    // to the IIFE scope above: tests/plugin-catalog-view.test.js lifts them out
-    // of this file and pins the search and filter semantics without a DOM.
+    // pmCatalogState, pmCatalogBadges, pmCatalogHaystack, pmCatalogFacets and
+    // pmFilterCatalog carry the pm prefix because they are deliberately free of
+    // any reference to the IIFE scope above: tests/plugin-catalog-view.test.js
+    // lifts them out of this file and pins the search, filter and card-badge
+    // semantics without a DOM.
     // Keep them that way — in particular, no template literals inside them,
     // since a brace-counting extractor reads their source text.
 
@@ -542,6 +543,55 @@
         if (entry.installedVersion == null) return 'available';
         if (!entry.installedVersion) return 'installed';
         return entry.installedVersion === entry.version ? 'installed' : 'update-available';
+    }
+
+    // The badges one card wears, in reading order: whether the entry fits this
+    // build at all, then which on-disk copy the backend loads — the
+    // installed / bundled / writable-override distinction of
+    // src/main/plugin-precedence.ts, reported per row as activeSource (issue
+    // #6) — then the install status and the selection tier. The tier badges are
+    // what keep a recommendation ("Recommended", indigo) from reading as a hard
+    // requirement: "Essential" (sky, locked into every plan) and the card's
+    // "Requires:" line are the two answers that are not optional.
+    // Plain objects in, plain class strings out, so the lifted test can assert
+    // the badge set without a DOM; titles carry the precedence rule in one
+    // sentence because "writable override" means nothing without it.
+    function pmCatalogBadges(entry) {
+        const badges = [];
+        if (entry.compat && entry.compat.ok === false) {
+            badges.push({ label: 'Incompatible', cls: 'bg-red-900/40 text-red-300' });
+        }
+        const sources = {
+            'bundled': {
+                label: 'Bundled',
+                cls: 'bg-sky-900/40 text-sky-300',
+                title: 'Ships with the app; the packaged copy is the one the backend loads.',
+            },
+            'writable-override': {
+                label: 'Writable override',
+                cls: 'bg-violet-900/40 text-violet-300',
+                title: 'Your copy shadows a packaged plugin with the same id, so the backend loads yours.',
+            },
+            'installed': {
+                label: 'Installed',
+                cls: 'bg-emerald-900/40 text-emerald-300',
+                title: 'Installed into your plugins folder; no packaged copy has this id.',
+            },
+        };
+        const source = sources[entry.activeSource];
+        if (source) badges.push(source);
+        const state = pmCatalogState(entry);
+        if (state === 'update-available') badges.push({ label: 'Update available', cls: 'bg-amber-900/40 text-amber-300' });
+        // "Available" (nothing on this machine) only fits when no source badge
+        // claims presence: activeSource reports 'bundled' for any packaged
+        // copy — including one whose manifest does not claim bundled: true —
+        // so that row would otherwise wear "Bundled" and "Available" at once,
+        // each saying the opposite about whether the plugin is here.
+        else if (state === 'available' && !source) badges.push({ label: 'Available', cls: 'bg-slate-700 text-slate-300' });
+        const tier = entry.selection ? entry.selection.tier : '';
+        if (tier === 'essential') badges.push({ label: 'Essential', cls: 'bg-sky-900/40 text-sky-300' });
+        else if (tier === 'recommended') badges.push({ label: 'Recommended', cls: 'bg-indigo-900/40 text-indigo-300' });
+        return badges;
     }
 
     // Everything free-text search looks at, lowercased. Instruments are folded
@@ -630,12 +680,6 @@
         'update-available': 'Update available',
     };
 
-    const CATALOG_STATE_CLASSES = {
-        installed: 'bg-emerald-900/40 text-emerald-300',
-        'update-available': 'bg-amber-900/40 text-amber-300',
-        available: 'bg-slate-700 text-slate-300',
-    };
-
     function catalogValueLabel(value) {
         return CATALOG_VALUE_LABELS[value] || String(value).charAt(0).toUpperCase() + String(value).slice(1);
     }
@@ -704,15 +748,41 @@
 
     function renderCatalogRows(rows) {
         catalogListEl.innerHTML = rows.map((entry) => {
-            const state = pmCatalogState(entry);
+            const badges = pmCatalogBadges(entry).map((badge) => `
+                    <span class="text-xs px-2 py-0.5 rounded whitespace-nowrap ${badge.cls}"${badge.title ? ` title="${esc(badge.title)}"` : ''}>${esc(badge.label)}</span>`).join('');
+            // The compatibility verdict comes from main (plugin-compat.ts): ok
+            // shows what the entry requires of this build, a failed verdict
+            // shows the reason instead — actionable, not just a red mark.
+            const compat = entry.compat || {};
+            const fit = compat.ok === false
+                ? `<div class="text-xs text-red-300 mt-0.5">${esc(compat.reason || 'This plugin does not fit this build.')}</div>`
+                : compat.requirements
+                    ? `<div class="text-xs text-slate-500 mt-0.5">Requires ${esc(compat.requirements)}</div>`
+                    : '';
+            // Declared dependencies are hard requirements (the install adds
+            // them whether or not anything recommends them), so they get their
+            // own line and never share the recommendation badges' styling.
+            const requires = Array.isArray(entry.dependencies) && entry.dependencies.length
+                ? `<div class="text-xs text-orange-300 mt-0.5">Requires: ${esc(entry.dependencies.join(', '))}</div>`
+                : '';
+            const meta = [];
+            if (entry.category) meta.push(entry.category);
+            if (Array.isArray(entry.instruments) && entry.instruments.length) meta.push(entry.instruments.join(', '));
+            if (entry.source) meta.push(catalogValueLabel(entry.source));
+            if (entry.stability) meta.push(catalogValueLabel(entry.stability));
+            if (entry.size && Number.isFinite(entry.size.downloadBytes)) {
+                meta.push(Math.max(1, Math.round(entry.size.downloadBytes / 1024)) + ' KB download');
+            }
             return `
                 <div class="p-3 rounded bg-slate-800/50 border border-slate-700">
                     <div class="flex items-center justify-between gap-2">
-                        <div class="text-sm font-medium text-slate-200">${esc(entry.name)}</div>
-                        <span class="text-xs px-2 py-0.5 rounded whitespace-nowrap ${CATALOG_STATE_CLASSES[state] || ''}">${esc(catalogValueLabel(state))}</span>
+                        <div class="text-sm font-medium text-slate-200">${esc(entry.name)} <span class="text-xs text-slate-500 font-normal">v${esc(entry.version)}</span></div>
+                        <div class="flex items-center gap-1 flex-wrap justify-end">${badges}</div>
                     </div>
                     <div class="text-xs text-slate-400 mt-0.5">${esc(entry.description)}</div>
-                    <div class="text-xs text-slate-500 mt-0.5">v${esc(entry.version)}</div>
+                    <div class="text-xs text-slate-500 mt-0.5">${meta.map(esc).join(' · ')}</div>
+                    ${fit}
+                    ${requires}
                 </div>`;
         }).join('');
     }

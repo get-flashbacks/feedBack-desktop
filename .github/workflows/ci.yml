@@ -48,6 +48,9 @@ jobs:
       - name: Run plugin catalog tests
         run: node --test tests/plugin-catalog.test.js
 
+      - name: Run plugin compatibility tests
+        run: node --test tests/plugin-compat.test.js
+
       - name: Run plugin installer tests
         run: node --test tests/plugin-installer.test.js
 
