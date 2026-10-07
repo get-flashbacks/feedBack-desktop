@@ -5,6 +5,11 @@
 // pmCatalogFacets and pmFilterCatalog. The rendered card itself is checked
 // through a DOM stub below — the view is all that is tested here; installing
 // is issue #18 (4/5).
+//
+// The install list below the view (issue #17, catalog UI 3/5) is built by the
+// same screen script and the same DOM stub, so its render and the note it
+// writes before anything is downloaded are pinned here too: this suite is
+// where the whole-screen harness lives.
 
 'use strict';
 
@@ -544,17 +549,25 @@ function makeDocument() {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-// Load the whole screen with the given catalog rows and return the browse
-// list's HTML once both startup loads (installed list and catalog) have
-// drained. Two flushes mirror the sibling suite: the second catches the chain
-// that awaits the first.
-async function renderedCatalog(entries) {
+// Load the whole screen with the given catalog rows. `plan` is what the
+// install list's plugins.resolveCatalog answers; every other bridge call the
+// screen makes at load is stubbed so a render that reaches for one does not
+// throw. The resolved calls are counted — one per render is the point of the
+// test at the bottom of this file.
+async function runScreen(entries, { plan, ...extra } = {}) {
     const document = makeDocument();
+    const resolveCalls = [];
     const plugins = {
         listInstalled: () => Promise.resolve([]),
         catalog: () => Promise.resolve({ ok: true, entries }),
         remove: async () => ({ success: true, message: 'Removed.' }),
         update: async () => ({ success: true, message: 'Updated.' }),
+        resolveCatalog: async (ids) => {
+            resolveCalls.push([...ids]);
+            if (plan) return typeof plan === 'function' ? plan(ids) : plan;
+            return { ids, outstanding: ids, required: {}, conflicts: [] };
+        },
+        ...extra,
     };
     const sandbox = {
         window: { feedBackDesktop: { plugins } },
@@ -568,6 +581,14 @@ async function renderedCatalog(entries) {
     vm.runInNewContext(SCREEN_JS, sandbox, { filename: 'plugin-manager/screen.js' });
     await flush();
     await flush();
+    return { document, resolveCalls };
+}
+
+// Browse list's HTML once both startup loads (installed list and catalog) have
+// drained. Two flushes mirror the sibling suite: the second catches the chain
+// that awaits the first.
+async function renderedCatalog(entries) {
+    const { document } = await runScreen(entries);
     return document.getElementById('pm-catalog-list').innerHTML;
 }
 
@@ -658,4 +679,99 @@ test('every catalog field on a card arrives escaped, never as markup', async () 
     assert.ok(!html.includes('<script>'), 'the reason is escaped too');
     assert.ok(html.includes('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;'), 'escaped, not dropped');
     assert.ok(html.includes('&lt;b&gt;desc&lt;/b&gt;'), 'description escaped, not dropped');
+});
+
+// ── The install list (issue #17, catalog UI 3/5) ─────────────────────────
+
+test('the install list reads the same { ok, entries } payload the browse list does', async () => {
+    const { document } = await runScreen([
+        entry({ id: 'alpha', name: 'Practice Alpha' }),
+        entry({ id: 'beta', name: 'Practice Beta' }),
+    ]);
+    const list = document.getElementById('pm-catalog');
+    assert.equal(list.children.length, 2, 'a checkbox row per catalog entry, not the empty-list message');
+    assert.equal(list.children[0].children[0].type, 'checkbox');
+    assert.equal(list.children[0].children[0].handlers.change.length, 1, 'one change handler per row');
+    // Both lists are fed the same one payload, so neither can be starved.
+    const browse = document.getElementById('pm-catalog-list').innerHTML;
+    assert.ok(browse.includes('Practice Alpha'), `browse cards render too, got:\n${browse}`);
+});
+
+test('checking a box resolves the selection in main and explains the dependencies it pulls in', async () => {
+    const { document, resolveCalls } = await runScreen(
+        [entry({ id: 'alpha', name: 'Practice Alpha' }), entry({ id: 'core', name: 'Core' })],
+        {
+            plan: {
+                ids: ['alpha', 'core'],
+                outstanding: ['alpha', 'core'],
+                required: { alpha: ['core'] },
+                conflicts: [],
+            },
+        }
+    );
+    const box = document.getElementById('pm-catalog').children[0].children[0];
+    box.checked = true;
+    await box.handlers.change[0]();
+
+    assert.deepEqual(resolveCalls, [['alpha']], 'the resolver is asked about the selection the user just made');
+    assert.equal(
+        document.getElementById('pm-catalog-deps').textContent,
+        'Automatically selected required dependencies: core.',
+        'a dependency the user never ticked is named, not silently added'
+    );
+});
+
+test('a selection the resolver pruned is reported before anything is downloaded', async () => {
+    const { document } = await runScreen(
+        [entry({ id: 'alpha', name: 'Practice Alpha' }), entry({ id: 'beta' }), entry({ id: 'gamma' })],
+        {
+            plan: {
+                ids: ['alpha'],
+                outstanding: ['alpha'],
+                required: {},
+                // A kept/dropped pair is a clash; no keeper is the cascade
+                // that followed some other drop.
+                conflicts: [
+                    { kept: 'alpha', dropped: 'beta' },
+                    { kept: null, dropped: 'gamma' },
+                ],
+            },
+        }
+    );
+    const box = document.getElementById('pm-catalog').children[0].children[0];
+    box.checked = true;
+    await box.handlers.change[0]();
+
+    assert.equal(
+        document.getElementById('pm-catalog-deps').textContent,
+        'Will not install: beta conflicts with alpha; gamma depends on something that was dropped.'
+    );
+});
+
+test('a re-render resolves the selection once, not once per row', async () => {
+    const { document, resolveCalls } = await runScreen(
+        [
+            entry({ id: 'alpha', name: 'Practice Alpha', canRollback: true }),
+            entry({ id: 'beta', name: 'Practice Beta' }),
+            entry({ id: 'gamma', name: 'Tools Gamma' }),
+        ],
+        { rollbackCatalog: async () => ({ success: true, message: 'Restored.' }) }
+    );
+
+    const list = document.getElementById('pm-catalog');
+    assert.equal(list.children.length, 3, 'three rows to build');
+    const box = list.children[0].children[0];
+    box.checked = true;
+    await box.handlers.change[0]();
+    assert.equal(resolveCalls.length, 1, 'one resolve for the change');
+
+    // Restoring a previous version rebuilds the list; the selection is still
+    // set, so the rebuild has to refresh the note — once, not once per row.
+    const restore = list.children[0].children.find((child) => child.textContent === 'Restore previous');
+    assert.ok(restore, 'the rollback control is offered');
+    await restore.handlers.click[0]({ preventDefault() {}, stopPropagation() {} });
+    await flush();
+    await flush();
+
+    assert.equal(resolveCalls.length, 2, `one resolve for the whole rebuild, got ${resolveCalls.length}`);
 });
