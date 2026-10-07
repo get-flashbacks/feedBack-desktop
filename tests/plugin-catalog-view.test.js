@@ -798,6 +798,86 @@ test('a selection the resolver pruned is reported before anything is downloaded'
     assert.equal(list.children[2].children[0].checked, false, 'the pruned cascade is unticked');
 });
 
+test('a dependency the resolver pruned is never adopted or locked behind its dependent', async () => {
+    // Pruned beats locked: B clashes with the keeper C, so the resolver drops
+    // B and cascades A (which needed B). A dropped dependent must not drag its
+    // dependency into the set, lock it, or name it as required.
+    const { document } = await runScreen(
+        [
+            entry({ id: 'a', name: 'Dependent A', dependencies: ['b'] }),
+            entry({ id: 'b', name: 'Clashing B', conflicts: ['c'] }),
+            entry({ id: 'c', name: 'Keeper C' }),
+        ],
+        {
+            plan: (ids) => (ids.includes('a') && ids.includes('c')
+                ? {
+                    ids: ['c'],
+                    outstanding: ['c'],
+                    required: {},
+                    conflicts: [
+                        { kept: 'c', dropped: 'b' },
+                        { kept: null, dropped: 'a' },
+                    ],
+                }
+                : { ids, outstanding: ids, required: {}, conflicts: [] }),
+        }
+    );
+    const list = document.getElementById('pm-catalog');
+    const aBox = list.children[0].children[0];
+    const bBox = list.children[1].children[0];
+    const cBox = list.children[2].children[0];
+    aBox.checked = true;
+    await aBox.handlers.change[0]();
+    cBox.checked = true;
+    await cBox.handlers.change[0]();
+
+    assert.equal(aBox.checked, false, 'the pruned dependent is unticked');
+    assert.equal(bBox.checked, false, 'its dependency is not adopted behind it');
+    assert.equal(bBox.disabled, false, 'and not locked: nothing surviving requires it');
+    assert.equal(cBox.checked, true, 'the keeper stays selected');
+    const note = document.getElementById('pm-catalog-deps').textContent;
+    assert.ok(!note.includes('Required by the selection'), `no lock line for a pruned tree, got:\n${note}`);
+    assert.match(
+        note,
+        /Will not install: Clashing B conflicts with Keeper C; Dependent A depends on something that was dropped/
+    );
+});
+
+test('transitive dependencies are adopted in the same resolve, not one per round trip', async () => {
+    // A requires B, B requires C: one tick of A must land the whole chain on
+    // the rows, or the note would name an install-set entry whose box is
+    // still unchecked until the next selection change.
+    const { document, resolveCalls } = await runScreen(
+        [
+            entry({ id: 'a', name: 'Dependent A', dependencies: ['b'] }),
+            entry({ id: 'b', name: 'Middle B', dependencies: ['c'] }),
+            entry({ id: 'c', name: 'Leaf C' }),
+        ],
+        {
+            plan: () => ({ ids: ['a', 'b', 'c'], outstanding: ['a', 'b', 'c'], required: {}, conflicts: [] }),
+        }
+    );
+    const list = document.getElementById('pm-catalog');
+    const aBox = list.children[0].children[0];
+    aBox.checked = true;
+    await aBox.handlers.change[0]();
+
+    assert.equal(resolveCalls.length, 1, 'one resolve adopts the whole chain');
+    const bBox = list.children[1].children[0];
+    const cBox = list.children[2].children[0];
+    assert.equal(bBox.checked, true, 'the direct dependency is adopted');
+    assert.equal(bBox.disabled, true, 'and locked');
+    assert.equal(cBox.checked, true, 'the leaf is adopted in the same pass');
+    assert.equal(cBox.disabled, true, 'and locked too');
+    const note = document.getElementById('pm-catalog-deps').textContent;
+    assert.match(
+        note,
+        /Required by the selection: Middle B \(required by Dependent A\); Leaf C \(required by Middle B\)/,
+        `the whole chain is explained, got:\n${note}`
+    );
+    assert.equal(document.getElementById('pm-catalog-install').textContent, 'Install selected (3)');
+});
+
 test('a re-render resolves the selection once, not once per row', async () => {
     const { document, resolveCalls } = await runScreen(
         [

@@ -25,6 +25,7 @@ import {
 } from './python';
 import {
     ActivationStatus,
+    BatchItemResult,
     Catalog,
     CatalogEntry,
     FetchLike,
@@ -519,11 +520,12 @@ export interface CatalogInstallOptions {
     signal?: AbortSignal;
 }
 
-/** Shape of the promise installFromCatalog answers — results are batch items. */
+/** Shape of the promise installFromCatalog answers. */
 export interface CatalogInstallResult {
     success: boolean;
     message: string;
-    results: unknown[];
+    /** Batch items plus the lifecycle/compatibility refusals, batch-shaped. */
+    results: BatchItemResult[];
     /** Set when every fix is reconnecting; the renderer says so instead of "failed". */
     networkRequired?: boolean;
 }
