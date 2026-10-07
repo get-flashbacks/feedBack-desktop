@@ -546,6 +546,7 @@ function makeElement(tag = 'div') {
         attributes: {},
         setAttribute(name, value) { el.attributes[name] = String(value); },
         getAttribute(name) { return Object.prototype.hasOwnProperty.call(el.attributes, name) ? el.attributes[name] : null; },
+        removeAttribute(name) { delete el.attributes[name]; },
     };
     let html = '';
     Object.defineProperty(el, 'innerHTML', {

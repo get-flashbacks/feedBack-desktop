@@ -272,10 +272,9 @@
                 else if (entry.updateStatus === 'ahead') staticReason = 'The catalog is older than the copy installed. Use Downgrade to go back.';
                 else if (!installable) staticReason = 'Installed at this version already.';
                 if (staticReason) box.title = staticReason;
-                box.setAttribute('aria-describedby', [
-                    incompatible ? 'pm-row-reason-' + entry.id : '',
-                    'pm-row-lock-' + entry.id,
-                ].filter(Boolean).join(' '));
+                if (incompatible) {
+                    box.setAttribute('aria-describedby', 'pm-row-reason-' + entry.id);
+                }
                 if (box.disabled) catalogSelection.delete(entry.id);
                 box.checked = catalogSelection.has(entry.id);
                 box.addEventListener('change', async () => {
@@ -549,6 +548,7 @@
         for (const handleEntry of catalogBoxById) {
             const id = handleEntry[0];
             const handle = handleEntry[1];
+            const isIncompatible = !!handle.entry.compat && handle.entry.compat.ok === false;
             if (prunedIds.has(id)) {
                 // Pruned beats locked: a box the plan drops must never read as
                 // to-be-installed, whatever declared it as a dependency.
@@ -557,6 +557,7 @@
                 handle.lockEl.textContent = '';
                 handle.lockEl.classList.add('hidden');
                 handle.box.title = handle.staticReason;
+                if (!isIncompatible) handle.box.removeAttribute('aria-describedby');
             } else if (lockedBy.has(id)) {
                 handle.box.disabled = true;
                 if (!handle.staticDisabled) {
@@ -569,12 +570,14 @@
                     handle.box.title = lockText;
                     handle.lockEl.textContent = lockText;
                     handle.lockEl.classList.remove('hidden');
+                    handle.box.setAttribute('aria-describedby', 'pm-row-lock-' + id);
                 } else {
                     // Already on disk (bundled, or held): the row says what is
                     // on it, and a "locked into the plan" line over a checkbox
                     // that was never selectable would only confuse.
                     handle.lockEl.textContent = '';
                     handle.lockEl.classList.add('hidden');
+                    if (!isIncompatible) handle.box.removeAttribute('aria-describedby');
                 }
             } else {
                 handle.box.disabled = handle.staticDisabled;
@@ -582,6 +585,7 @@
                 handle.lockEl.textContent = '';
                 handle.lockEl.classList.add('hidden');
                 handle.box.title = handle.staticReason;
+                if (!isIncompatible) handle.box.removeAttribute('aria-describedby');
             }
         }
         const locked = [...lockedBy]
@@ -596,6 +600,7 @@
         if (!ids.length) {
             catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
+            mirrorPlanOntoRows(null);
             updateInstallLabel();
             return;
         }
