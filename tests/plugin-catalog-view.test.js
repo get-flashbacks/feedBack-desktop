@@ -73,6 +73,7 @@ function entry(overrides) {
         selection: { tier: 'optional', defaultSelected: false },
         installedVersion: null,
         bundled: false,
+        activeSource: 'none',
         canRollback: false,
         ...overrides,
     };
@@ -326,7 +327,7 @@ test('the bundled catalog lists and filters with no network', () => {
     // on disk plus the main process's install-state fields. Nothing here can
     // reach the network, which is the offline guarantee for this view.
     const raw = JSON.parse(fs.readFileSync(CATALOG_JSON, 'utf8'));
-    const rows = raw.entries.map((row) => ({ ...row, installedVersion: null, bundled: false, canRollback: false }));
+    const rows = raw.entries.map((row) => ({ ...row, installedVersion: null, bundled: false, activeSource: 'none', canRollback: false }));
 
     assert.ok(rows.length > 0, 'the bundled catalog should ship entries');
     assert.deepEqual(ids(view.pmFilterCatalog(rows, filters())), ids(rows));
@@ -371,7 +372,7 @@ test('the row fields this suite builds are the ones plugins:catalog sends', () =
     const start = main.indexOf('function listCatalog(');
     assert.ok(start !== -1, 'listCatalog should exist in plugin-manager.ts');
     const listCatalogSource = main.slice(start, main.indexOf('\n}\n', start));
-    for (const field of ['installedVersion', 'bundled', 'canRollback']) {
+    for (const field of ['installedVersion', 'bundled', 'activeSource', 'canRollback']) {
         assert.ok(listCatalogSource.includes(field), `listCatalog should attach '${field}' to every row`);
     }
     // The error state depends on the handler being able to report a failure at

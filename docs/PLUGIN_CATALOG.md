@@ -53,9 +53,12 @@ process; `src/main/plugin-archive.ts` is its dependency-free ZIP reader. The
 renderer reaches it through `window.feedBackDesktop.plugins`:
 
 - `catalog()` — `{ ok, entries, message? }`, where each entry carries
-  `installedVersion`, `bundled`, and `canRollback`. `ok: false` means the
-  bundled catalog file is missing or unreadable, which the catalog view shows
-  as an error rather than as an empty catalog.
+  `installedVersion` (the version of any user-installed copy, `null` when only
+  the packaged copy exists), `bundled` (the packaged copy is a bundled
+  baseline), `activeSource` (which copy the backend loads — `bundled`,
+  `writable-override`, `installed`, or `none`), and `canRollback`. `ok: false`
+  means the bundled catalog file is missing or unreadable, which the catalog
+  view shows as an error rather than as an empty catalog.
 - `installCatalog(ids)` — install a batch by catalog id.
 - `rollbackCatalog(id)` — restore the version kept in the backup slot.
 - `onInstallProgress(cb)` — progress ticks of the in-flight batch, broadcast to
@@ -150,6 +153,21 @@ has `"bundled": true` in its manifest; that copy always wins (see core's
 `_is_bundled`). The installer reads the packaged core plugins dir and refuses
 to install over those ids, because the installed copy would be silently
 ignored. The packaged application itself is never modified.
+
+`plugins:catalog` reports the resolution per entry as `activeSource`: the
+packaged copy ("bundled"), a user copy shadowing a packaged one that did not
+claim `bundled: true` ("writable-override"), a user copy with no packaged one
+beneath it ("installed"), or nothing on disk ("none"). `bundled` still means
+"the packaged copy is a bundled baseline" — the two fields answer different
+questions, so a packaged non-baseline with no user copy reports
+`bundled: false` with `activeSource: 'bundled'`. The rule lives in
+`src/main/plugin-precedence.ts` (issue #22).
+
+One deliberate divergence from the backend: when two directories in the same
+root claim the same id (a hand-broken layout), the desktop resolves duplicates
+by sorted directory name, which the backend's unsorted scan does not guarantee.
+This only affects which copy's version `installedVersion` names; `activeSource`
+distinguishes only between the core and user roots and is unaffected.
 
 The legacy `plugins:install` / `plugins:update` git paths remain for
 developer-supplied repository URLs. They still require Git.
