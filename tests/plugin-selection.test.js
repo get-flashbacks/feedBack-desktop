@@ -40,6 +40,7 @@ function row(id, overrides = {}) {
         },
         ...(overrides.installedVersion ? { installedVersion: overrides.installedVersion } : {}),
         ...(overrides.bundled ? { bundled: true } : {}),
+        ...(overrides.activeSource ? { activeSource: overrides.activeSource } : {}),
     };
 }
 

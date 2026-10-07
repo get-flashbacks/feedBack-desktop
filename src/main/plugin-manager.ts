@@ -44,6 +44,7 @@ import {
     resolveSafePluginDir,
     rollbackInstall,
 } from './plugin-installer';
+import { activeSourceFor, scanPluginCopies, type PluginCopy } from './plugin-precedence';
 import {
     IPC_PLUGIN_CATALOG_CANCEL,
     IPC_PLUGIN_CATALOG_PROGRESS,
@@ -348,39 +349,12 @@ async function recordQuietly(entries: CatalogEntry[]): Promise<void> {
     }
 }
 
-function readManifest(dir: string): Record<string, any> | null {
-    try {
-        // dir is a scanned plugin directory; the file name is a literal
-        const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'plugin.json'), 'utf-8'));
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-    } catch {
-        return null;
-    }
-}
-
-// Mirrors the backend's _is_bundled(): a core plugin wins over a user copy
-// only when it sits directly in the core plugins dir, its manifest says
-// `"bundled": true`, and its directory name equals its id. Any other core
-// plugin with the same id is overridden by the user-installed copy, because
-// the backend scans the user plugins dir first.
-function scanPluginDir(dir: string): { ids: Set<string>; bundledIds: Set<string> } {
+// Which core copies are bundled baselines: install is refused over those ids,
+// because the backend would silently load the baseline instead of the copy.
+function bundledBaselineIds(copies: Map<string, PluginCopy>): Set<string> {
     const ids = new Set<string>();
-    const bundledIds = new Set<string>();
-    let entries: fs.Dirent[] = [];
-    try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-        return { ids, bundledIds };
-    }
-    for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue;
-        // entry.name comes from readdirSync of the app's own plugins directory
-        const manifest = readManifest(path.join(dir, entry.name));
-        if (!manifest || typeof manifest.id !== 'string') continue;
-        ids.add(manifest.id);
-        if (manifest.bundled === true && entry.name === manifest.id) bundledIds.add(manifest.id);
-    }
-    return { ids, bundledIds };
+    for (const [id, copy] of copies) if (copy.bundled) ids.add(id);
+    return ids;
 }
 
 // A cold backend enumerating its plugins can take well over 5s to answer, and
@@ -561,8 +535,8 @@ export async function installFromCatalog(
     try {
         const pluginsDir = getPluginsDir();
         cleanupStaging(pluginsDir);
-        const user = scanPluginDir(pluginsDir);
-        const core = scanPluginDir(getCorePluginsDir());
+        const user = scanPluginCopies(pluginsDir);
+        const core = scanPluginCopies(getCorePluginsDir());
         const catalog = getCatalog();
         // A pin or a disable is the user's decision about an installed copy, so
         // the batch path honours it too — selecting a pinned plugin in the
@@ -573,8 +547,8 @@ export async function installFromCatalog(
         const results = await installCatalogBatch(allowed, catalog, {
             pluginsDir,
             fetch: fetch as unknown as FetchLike,
-            protectedIds: core.bundledIds,
-            installedIds: new Set([...user.ids, ...core.ids]),
+            protectedIds: bundledBaselineIds(core),
+            installedIds: new Set([...user.keys(), ...core.keys()]),
             activate: activateInstalled,
             restartAfterRollback: async () => { await restartPythonAndWait(); },
             onProgress,
@@ -625,21 +599,21 @@ export function listCatalog(): { ok: boolean; entries: unknown[]; message?: stri
         };
     }
     const pluginsDir = getPluginsDir();
-    const installed = new Map<string, string>();
-    for (const entry of fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir) : []) {
-        if (entry.startsWith('.')) continue;
-        const manifest = readManifest(path.join(pluginsDir, entry));
-        if (manifest && typeof manifest.id === 'string') installed.set(manifest.id, String(manifest.version ?? ''));
-    }
-    const bundled = scanPluginDir(getCorePluginsDir()).bundledIds;
+    const overrides = scanPluginCopies(pluginsDir);
+    const baselines = scanPluginCopies(getCorePluginsDir());
     return {
         ok: true,
-        entries: catalog.entries.map(entry => ({
-            ...entry,
-            installedVersion: installed.get(entry.id) ?? null,
-            bundled: bundled.has(entry.id),
-            canRollback: hasBackup(pluginsDir, entry.installDir),
-        })),
+        entries: catalog.entries.map(entry => {
+            const baseline = baselines.get(entry.id) ?? null;
+            const override = overrides.get(entry.id) ?? null;
+            return {
+                ...entry,
+                installedVersion: override?.version ?? null,
+                bundled: baseline?.bundled === true,
+                activeSource: activeSourceFor(baseline, override),
+                canRollback: hasBackup(pluginsDir, entry.installDir),
+            };
+        }),
     };
 }
 
@@ -789,11 +763,11 @@ async function installOverInstalled(
     catalogBusy = true;
     try {
         cleanupStaging(pluginsDir);
-        const core = scanPluginDir(getCorePluginsDir());
+        const core = scanPluginCopies(getCorePluginsDir());
         const outcome = await installCatalogEntry(entry, {
             pluginsDir,
             fetch: fetch as unknown as FetchLike,
-            protectedIds: core.bundledIds,
+            protectedIds: bundledBaselineIds(core),
             onProgress: options.onProgress ?? throttledProgress(),
         });
         const status = (await activateInstalled([outcome])).get(entry.id);

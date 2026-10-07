@@ -532,11 +532,11 @@
     // Whether an entry is present on this machine, and whether the catalog pins a
     // different version than the one in use. A bundled copy is the one the
     // backend loads ahead of any user copy — the _is_bundled rule that
-    // scanPluginDir in src/main/plugin-manager.ts mirrors — so it decides on its
-    // own and is never reported as upgradable: a bundled plugin can only change
-    // with a new desktop build, and the catalog installer refuses those ids
-    // outright. A user copy installed through git need not carry a version in
-    // its manifest, which is a copy present but not comparable.
+    // activeSource in src/main/plugin-precedence.ts mirrors — so it decides on
+    // its own and is never reported as upgradable: a bundled plugin can only
+    // change with a new desktop build, and the catalog installer refuses those
+    // ids outright. A user copy installed through git need not carry a version
+    // in its manifest, which is a copy present but not comparable.
     function pmCatalogState(entry) {
         if (entry.bundled) return 'installed';
         if (entry.installedVersion == null) return 'available';

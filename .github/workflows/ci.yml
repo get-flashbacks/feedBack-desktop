@@ -59,6 +59,9 @@ jobs:
       - name: Run plugin lifecycle tests
         run: node --test tests/plugin-lifecycle.test.js
 
+      - name: Run plugin precedence tests
+        run: node --test tests/plugin-precedence.test.js
+
       - name: Run plugin selection tests
         run: node --test tests/plugin-selection.test.js
 
