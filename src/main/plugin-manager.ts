@@ -1113,6 +1113,29 @@ export function initPluginManager(getWindow: () => BrowserWindow | null = () => 
 
     ipcMain.handle('plugins:catalog', () => listCatalog());
 
+    ipcMain.handle('plugins:resolveCatalog', (_event, ids: unknown) => {
+        const plan = planCatalogInstall(ids);
+        const entries = catalogSelectionEntries();
+        const byId = new Map(entries.map(e => [e.id, e]));
+        const required: Record<string, string[]> = {};
+        const visited = new Set<string>();
+        const visit = (id: string) => {
+            if (visited.has(id)) return;
+            visited.add(id);
+            const entry = byId.get(id);
+            if (!entry) return;
+            for (const dep of entry.dependencies || []) {
+                if (byId.has(dep)) {
+                    if (!required[id]) required[id] = [];
+                    required[id].push(dep);
+                    visit(dep);
+                }
+            }
+        };
+        for (const id of plan.ids) visit(id);
+        return { ids: plan.ids, outstanding: plan.outstanding, required, conflicts: [] };
+    });
+
     ipcMain.handle('plugins:installCatalog', async (_event, ids: unknown) => {
         // Resolved in main, like the wizard's own install: dependencies and
         // conflicts are settled against the bundled catalog rather than left for

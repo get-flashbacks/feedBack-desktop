@@ -523,6 +523,7 @@ const feedBackDesktopApi = {
         // must show as an error rather than as an empty catalog.
         catalog: (): Promise<{ ok: boolean; entries: unknown[]; message?: string }> =>
             ipcRenderer.invoke('plugins:catalog'),
+        resolveCatalog: (ids: string[]) => ipcRenderer.invoke('plugins:resolveCatalog', ids),
         installCatalog: (ids: string[]) => ipcRenderer.invoke('plugins:installCatalog', ids),
         rollbackCatalog: (id: string) => ipcRenderer.invoke('plugins:rollbackCatalog', id),
         // Progress of the in-flight catalog batch (broadcast to every window),
