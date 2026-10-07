@@ -406,6 +406,38 @@ test('the row fields this suite builds are the ones plugins:catalog sends', () =
     assert.match(listCatalogSource, /ok: true/);
 });
 
+test('listCatalog attaches the lifecycle view so the install list keeps its controls', () => {
+    // Catalog UI 1/5 dropped the lifecycle fields (installed, pinned, disabled,
+    // updateStatus, updateAvailable, downgradeVersions) from the row while
+    // reworking the payload shape, which left every update/pin/disable control
+    // in the install list dead — the checkboxes were the only part still
+    // working. Pin the attach again, alongside the compat verdict.
+    const main = fs.readFileSync(path.join(ROOT, 'src', 'main', 'plugin-manager.ts'), 'utf8');
+    const start = main.indexOf('function listCatalog(');
+    assert.ok(start !== -1, 'listCatalog should exist in plugin-manager.ts');
+    const listCatalogSource = main.slice(start, main.indexOf('\n}\n', start));
+    assert.match(listCatalogSource, /lifecycleView\(/, 'the view is built from the record');
+    for (const field of ['installedVersion', 'bundled', 'activeSource', 'canRollback', 'compat']) {
+        assert.ok(listCatalogSource.includes(field), `listCatalog should still attach '${field}' to every row`);
+    }
+});
+
+test('the install action gates incompatible entries in main, with the reason, before downloading', () => {
+    // The cards ask compatibilityFor(); the install path must ask the same
+    // single question, so a plugin the backend cannot load is refused with the
+    // same words the card showed — not downloaded first and failed later.
+    const main = fs.readFileSync(path.join(ROOT, 'src', 'main', 'plugin-manager.ts'), 'utf8');
+    const start = main.indexOf('function refuseIncompatible(');
+    assert.ok(start !== -1, 'installFromCatalog should split off entries this build cannot run');
+    const gate = main.slice(start, main.indexOf('\n}', start));
+    assert.match(gate, /compatibilityFor\(/, 'the same rule the cards use');
+    assert.match(gate, /verdict\.reason/, 'the refusal carries the actionable reason');
+    const installStart = main.indexOf('export async function installFromCatalog(');
+    const install = main.slice(installStart, main.indexOf('\n}', installStart));
+    assert.match(install, /refuseIncompatible\(/, 'the batch only receives what fits');
+    assert.match(install, /networkRequired/, 'connect-only failures are reported as such');
+});
+
 // ── Card badges ──────────────────────────────────────────────────────
 
 function labels(entry) {
@@ -699,7 +731,7 @@ test('the install list reads the same { ok, entries } payload the browse list do
 
 test('checking a box resolves the selection in main and explains the dependencies it pulls in', async () => {
     const { document, resolveCalls } = await runScreen(
-        [entry({ id: 'alpha', name: 'Practice Alpha' }), entry({ id: 'core', name: 'Core' })],
+        [entry({ id: 'alpha', name: 'Practice Alpha', dependencies: ['core'] }), entry({ id: 'core', name: 'Core' })],
         {
             plan: {
                 ids: ['alpha', 'core'],
@@ -709,21 +741,32 @@ test('checking a box resolves the selection in main and explains the dependencie
             },
         }
     );
-    const box = document.getElementById('pm-catalog').children[0].children[0];
+    const list = document.getElementById('pm-catalog');
+    const box = list.children[0].children[0];
     box.checked = true;
     await box.handlers.change[0]();
 
     assert.deepEqual(resolveCalls, [['alpha']], 'the resolver is asked about the selection the user just made');
     assert.equal(
         document.getElementById('pm-catalog-deps').textContent,
-        'Automatically selected required dependencies: core.',
-        'a dependency the user never ticked is named, not silently added'
+        'Install set (2): Practice Alpha, Core.\n'
+        + 'Required by the selection: Core (required by Practice Alpha).\n'
+        + '2 downloads. Installing requires a network connection; the catalog itself stays available offline.',
+        'the whole resolved set is visible before the install is confirmed, with the request named'
     );
+    // The resolver's answer is reflected on the rows: the dependency the user
+    // never ticked is adopted into the plan and locked — unticking must not be
+    // a silent detour around the resolution.
+    const coreBox = list.children[1].children[0];
+    assert.equal(coreBox.checked, true, 'the auto-added dependency is ticked');
+    assert.equal(coreBox.disabled, true, 'and locked while something selected needs it');
+    const installBtn = document.getElementById('pm-catalog-install');
+    assert.equal(installBtn.textContent, 'Install selected (2)', 'the button counts the resolved set, not the raw ticks');
 });
 
 test('a selection the resolver pruned is reported before anything is downloaded', async () => {
     const { document } = await runScreen(
-        [entry({ id: 'alpha', name: 'Practice Alpha' }), entry({ id: 'beta' }), entry({ id: 'gamma' })],
+        [entry({ id: 'alpha', name: 'Practice Alpha' }), entry({ id: 'beta', name: 'Practice Beta' }), entry({ id: 'gamma', name: 'Tools Gamma' })],
         {
             plan: {
                 ids: ['alpha'],
@@ -738,14 +781,21 @@ test('a selection the resolver pruned is reported before anything is downloaded'
             },
         }
     );
-    const box = document.getElementById('pm-catalog').children[0].children[0];
+    const list = document.getElementById('pm-catalog');
+    const box = list.children[0].children[0];
     box.checked = true;
     await box.handlers.change[0]();
 
     assert.equal(
         document.getElementById('pm-catalog-deps').textContent,
-        'Will not install: beta conflicts with alpha; gamma depends on something that was dropped.'
+        'Install set (1): Practice Alpha.\n'
+        + 'Will not install: Practice Beta conflicts with Practice Alpha; Tools Gamma depends on something that was dropped.\n'
+        + '1 download. Installing requires a network connection; the catalog itself stays available offline.'
     );
+    // A dropped entry's box is unticked to match: a ticked checkbox that the
+    // plan refuses would read as installed.
+    assert.equal(list.children[1].children[0].checked, false, 'the pruned clash is unticked');
+    assert.equal(list.children[2].children[0].checked, false, 'the pruned cascade is unticked');
 });
 
 test('a re-render resolves the selection once, not once per row', async () => {
@@ -774,4 +824,193 @@ test('a re-render resolves the selection once, not once per row', async () => {
     await flush();
 
     assert.equal(resolveCalls.length, 2, `one resolve for the whole rebuild, got ${resolveCalls.length}`);
+});
+
+// ── The install action (issue #18, catalog UI 4/5) ───────────────────────
+//
+// One install action through the main-process API, with offline and error
+// states. The screen stub's plugins.installCatalog answers with the same shape
+// the plugins:installCatalog handler answers with; what is pinned here is how
+// the UI behaves on each answer — the states themselves, not the filesystem.
+
+// Tick a row, wait for the resolver pass it triggers, then run the single
+// install action the section wires, and drain the re-render it ends with.
+async function selectAndInstall(entries, extra) {
+    const screen = await runScreen(entries, extra);
+    const list = screen.document.getElementById('pm-catalog');
+    const box = list.children[0].children[0];
+    box.checked = true;
+    await box.handlers.change[0]();
+    const installBtn = screen.document.getElementById('pm-catalog-install');
+    await installBtn.handlers.click[0]();
+    await flush();
+    await flush();
+    return { ...screen, list, box };
+}
+
+test('an entry that does not fit this build cannot be ticked and says why, like its card', async () => {
+    const { document } = await runScreen([entry({
+        name: 'Future Thing',
+        compat: {
+            ok: false,
+            requirements: 'fee[dB]ack core 0.4.0 or newer',
+            reason: 'Future Thing needs fee[dB]ack core 0.4.0 or newer; this build ships 0.3.0.',
+        },
+    })]);
+    const list = document.getElementById('pm-catalog');
+    const box = list.children[0].children[0];
+    assert.equal(box.disabled, true, 'the checkbox is included with the selection controls, but off');
+    assert.equal(
+        box.checked, false,
+        'an incompatibility is not a waiting state: the plugin cannot be installed here at all'
+    );
+    assert.ok(
+        list.children[0].children[1].innerHTML.includes('Future Thing needs fee[dB]ack core 0.4.0 or newer; this build ships 0.3.0.'),
+        `the actionable reason is on the row itself, got:\n${list.children[0].children[1].innerHTML}`
+    );
+});
+
+test('an offline install reports that a connection is required and keeps the selection for retry', async () => {
+    const { document, list, box } = await selectAndInstall(
+        [entry({ id: 'alpha', name: 'Practice Alpha' })],
+        {
+            // ids is an array from the screen's realm; reach through it instead
+            // of strict-deep-equality against this realm's Array.prototype.
+            installCatalog: async (ids) => {
+                assert.deepEqual([...ids], ['alpha'], 'the action sends the ticked selection; main resolves it');
+                return {
+                    success: false,
+                    networkRequired: true,
+                    message: '0 of 1 plugin installed.',
+                    results: [{
+                        id: 'alpha',
+                        name: 'Practice Alpha',
+                        success: false,
+                        message: 'Could not download Practice Alpha. Check your internet connection and try again.',
+                        networkRequired: true,
+                    }],
+                };
+            },
+            onInstallProgress: () => () => {},
+        }
+    );
+    const msg = document.getElementById('pm-catalog-msg');
+    assert.match(msg.textContent, /network connection is required/, `said up front, got:\n${msg.textContent}`);
+    assert.match(msg.textContent, /Practice Alpha: Could not download Practice Alpha/, 'the plugin’s own report stays');
+    assert.equal(box.checked, true, 'the tick survives the failed run so retrying is one click');
+    assert.equal(document.getElementById('pm-catalog-install').textContent, 'Install selected (1)');
+});
+
+test('a mixed install keeps what failed ticked, prunes what landed, and reports every plugin', async () => {
+    const { document } = await runScreen(
+        [
+            entry({ id: 'alpha', name: 'Practice Alpha' }),
+            entry({ id: 'beta', name: 'Practice Beta' }),
+        ],
+        {
+            installCatalog: async (ids) => {
+                assert.deepEqual([...ids].sort(), ['alpha', 'beta']);
+                return {
+                    success: false,
+                    message: '1 of 2 plugins installed.',
+                    results: [
+                        { id: 'alpha', name: 'Practice Alpha', success: true, message: 'Installed Practice Alpha 1.0.0.' },
+                        { id: 'beta', name: 'Practice Beta', success: false, message: 'Practice Beta conflicts with Practice Alpha. Install only one of them.' },
+                    ],
+                };
+            },
+            onInstallProgress: () => () => {},
+        }
+    );
+    const list = document.getElementById('pm-catalog');
+    for (const child of list.children) {
+        child.children[0].checked = true;
+        await child.children[0].handlers.change[0]();
+    }
+    await document.getElementById('pm-catalog-install').handlers.click[0]();
+    await flush();
+    await flush();
+
+    const msg = document.getElementById('pm-catalog-msg');
+    assert.match(msg.textContent, /1 of 2 plugins installed/, 'the running tally leads');
+    assert.match(msg.textContent, /Practice Beta: Practice Beta conflicts with Practice Alpha/, 'each failure is named');
+
+    assert.equal(list.children[0].children[0].checked, false, 'what landed is pruned from the set…');
+    assert.equal(list.children[1].children[0].checked, true, '…what failed stays ticked for the retry');
+});
+
+test('a successful install clears the selection and closes the plan note', async () => {
+    const { document, list } = await selectAndInstall(
+        [entry({ id: 'alpha', name: 'Practice Alpha' })],
+        {
+            installCatalog: async () => ({
+                success: true,
+                message: 'Installed 1 plugin.',
+                results: [{ id: 'alpha', name: 'Practice Alpha', success: true, message: 'Installed Practice Alpha 1.0.0.' }],
+            }),
+            onInstallProgress: () => () => {},
+        }
+    );
+    const msg = document.getElementById('pm-catalog-msg');
+    assert.match(msg.textContent, /Installed 1 plugin/);
+    assert.equal(list.children[0].children[0].checked, false, 'nothing is left ticked');
+    assert.equal(document.getElementById('pm-catalog-install').textContent, 'Install selected', 'the button resets');
+    assert.ok(
+        document.getElementById('pm-catalog-deps').textContent === '',
+        'the plan note is gone — nothing is queued any more'
+    );
+});
+
+test('the resolved plan is priced before confirmation: transfer size and the network it needs', async () => {
+    const { document } = await runScreen(
+        [entry({ id: 'alpha', name: 'Practice Alpha' }), entry({ id: 'core', name: 'Core' })],
+        {
+            plan: {
+                ids: ['alpha', 'core'],
+                outstanding: ['alpha', 'core'],
+                required: {},
+                conflicts: [],
+                downloadBytes: 476729,
+            },
+        }
+    );
+    const box = document.getElementById('pm-catalog').children[0].children[0];
+    box.checked = true;
+    await box.handlers.change[0]();;
+
+    const note = document.getElementById('pm-catalog-deps').textContent;
+    assert.match(note, /2 downloads \(~466 KB\)/, `the pinned size, got:\n${note}`);
+    assert.match(note, /Installing requires a network connection/, 'said before the click, not only after a failure');
+});
+
+test('the screen never writes plugin files itself — every action goes through the main-process bridge', () => {
+    // The renderer runs with nodeIntegration: false and contextIsolation: true,
+    // so it could not touch the disk even if it tried; these assertions keep it
+    // that way by construction. Every plugin operation — install included —
+    // must be an IPC-shaped call on window.feedBackDesktop.plugins, and the
+    // method name must be one main's preload actually exposes.
+    for (const pattern of [
+        /\brequire\s*\(/,
+        /\bmodule\.\b/,
+        /\bipcRenderer\b/,
+        /\bchild_process\b/,
+        /\bfs\.\w+\(/,
+        /\bprocess\.(?:exit|env|cwd)\b/,
+    ]) {
+        assert.ok(!pattern.test(SCREEN_JS), `screen.js must not reference ${pattern}`);
+    }
+
+    const preload = fs.readFileSync(path.join(ROOT, 'src', 'main', 'preload.ts'), 'utf8');
+    const start = preload.indexOf('plugins: {');
+    assert.ok(start !== -1, 'the preload exposes a plugins bridge');
+    const block = preload.slice(start, preload.indexOf('\n    },', start));
+    const bridged = new Set([...block.matchAll(/^\s{8}(\w+):/gm)].map((m) => m[1]));
+
+    const called = [...new Set([...SCREEN_JS.matchAll(/plugins\.([A-Za-z_$][\w$]*)\(/g)].map((m) => m[1]))];
+    assert.ok(called.includes('installCatalog'), 'the install action is part of the audited surface');
+    for (const name of called) {
+        assert.ok(bridged.has(name), `plugins.${name} must be a method the preload bridge defines`);
+    }
+    assert.ok(bridged.has('installCatalog') && bridged.has('resolveCatalog'),
+        'the bridge exposes the catalog install and resolution the screen wires');
 });

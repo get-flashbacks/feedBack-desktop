@@ -311,6 +311,39 @@ test('downloads are size-capped, host-pinned, and hash-verified', async () => {
     await assert.rejects(installer.downloadArchive(entry, async () => { throw new Error('ENOTFOUND'); }), /internet connection/);
 });
 
+test('connectivity failures are flagged as network-required; server rejections are not', async () => {
+    const zip = pluginZip();
+    const entry = entryFor(zip);
+    const url = installer.archiveUrlFor(entry);
+
+    // A dead network (connection refused, DNS failure, timeout) is the fixable
+    // case the Plugin Manager reports as "reconnect and try again".
+    const offline = await installer.downloadArchive(entry, async () => { throw new Error('getaddrinfo ENOTFOUND codeload.github.com'); }).catch(e => e);
+    assert.ok(offline instanceof installer.InstallError);
+    assert.strictEqual(offline.networkRequired, true);
+
+    // A stream that dies mid-transfer stays in the same class: nothing about
+    // the install was wrong, so retrying once connected is honest.
+    const interrupted = await installer.downloadArchive(entry, async () => ({
+        ok: true,
+        status: 200,
+        url,
+        headers: { get: () => null },
+        body: (async function* () { yield zip.subarray(0, 10); throw new Error('socket hang up'); })(),
+    })).catch(e => e);
+    assert.strictEqual(interrupted.networkRequired, true);
+
+    // The server answering "no" is not a connection problem, so the UI must
+    // not tell users to reconnect and retry over it.
+    const http404 = await installer.downloadArchive(entry, fakeFetch({})).catch(e => e);
+    assert.strictEqual(http404.networkRequired, false);
+
+    const tampered = Buffer.from(zip);
+    tampered[tampered.length - 50] ^= 0xff;
+    const integrity = await installer.downloadArchive(entry, fakeFetch({ [url]: { body: tampered } })).catch(e => e);
+    assert.strictEqual(integrity.networkRequired, false);
+});
+
 test('archive provenance and manifest must match the catalog entry', () => {
     const good = pluginZip();
     assert.strictEqual(installer.verifyArchive(good, entryFor(good)).manifest.id, 'example');
@@ -513,6 +546,28 @@ test('batch: one failing plugin does not affect others and the backend restarts 
     assert.ok(fs.existsSync(path.join(pluginsDir, 'alpha', 'plugin.json')));
     assert.ok(!fs.existsSync(path.join(pluginsDir, 'beta')));
     assert.ok(!fs.existsSync(path.join(pluginsDir, 'gamma')));
+});
+
+test('batch: a failure that only needs a connection is flagged on its own result', async () => {
+    const { pluginsDir, catalog } = batchSetup();
+    const alpha = catalog.byId.get('alpha');
+    const beta = catalog.byId.get('beta');
+    const results = await installer.installCatalogBatch(['alpha', 'beta'], catalog, {
+        pluginsDir,
+        installedIds: new Set(),
+        fetch: async (url) => {
+            if (url === installer.archiveUrlFor(alpha)) throw new Error('getaddrinfo ENOTFOUND codeload.github.com');
+            if (url === installer.archiveUrlFor(beta)) return { ok: false, status: 500, url, headers: { get: () => null }, body: null };
+            throw new Error('unexpected fetch: ' + url);
+        },
+    });
+    assert.strictEqual(results.length, 2);
+    assert.strictEqual(results[0].id, 'alpha');
+    assert.strictEqual(results[0].success, false);
+    assert.strictEqual(results[0].networkRequired, true, 'a dead network says "reconnect", not "failed"');
+    assert.strictEqual(results[1].id, 'beta');
+    assert.strictEqual(results[1].success, false);
+    assert.ok(!results[1].networkRequired, 'a server 500 is a rejected install, not a network problem');
 });
 
 test('batch: a failed activation restores the previous version and restarts once more', async () => {

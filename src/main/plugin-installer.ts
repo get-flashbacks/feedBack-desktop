@@ -32,11 +32,21 @@ import {
     singleRootPrefix,
 } from './plugin-archive';
 
-/** User-facing install failure. Messages never contain filesystem paths. */
+/**
+ * User-facing install failure. Messages never contain filesystem paths.
+ *
+ * `networkRequired` singles out the failures a connect-only fix can retry —
+ * the renderer reports those as "a connection is required" rather than as a
+ * broken install, and leaves the selection in place for another attempt once
+ * the network is back. Server rejections (auth, 404, size, integrity) are
+ * install failures, not network failures, and stay unflagged.
+ */
 export class InstallError extends Error {
-    constructor(message: string) {
+    readonly networkRequired: boolean;
+    constructor(message: string, options: { networkRequired?: boolean } = {}) {
         super(message);
         this.name = 'InstallError';
+        this.networkRequired = options.networkRequired === true;
     }
 }
 
@@ -298,7 +308,7 @@ export async function downloadArchive(
         response = await fetchImpl(url, { redirect: 'follow', signal: downloadSignal(opts.signal) });
     } catch {
         if (opts.signal?.aborted) throw cancelledError(entry);
-        throw new InstallError(`Could not download ${entry.name}. Check your internet connection and try again.`);
+        throw new InstallError(`Could not download ${entry.name}. Check your internet connection and try again.`, { networkRequired: true });
     }
     let finalUrl: URL;
     try {
@@ -338,7 +348,9 @@ export async function downloadArchive(
     } catch (e) {
         if (e instanceof InstallError) throw e;
         if (opts.signal?.aborted) throw cancelledError(entry);
-        throw new InstallError(`The download of ${entry.name} was interrupted. Please try again.`);
+        // A stream that dies mid-transfer is a connection problem until the
+        // retry says otherwise, so it gets the same hint as a refused socket.
+        throw new InstallError(`The download of ${entry.name} was interrupted. Please try again.`, { networkRequired: true });
     }
     if (opts.signal?.aborted) throw cancelledError(entry);
     if (received !== expected) {
@@ -919,6 +931,8 @@ export interface BatchItemResult {
     name: string;
     success: boolean;
     message: string;
+    /** The failure was a connectivity problem, so as a whole it is retryable. */
+    networkRequired?: boolean;
 }
 
 export interface ActivationStatus {
@@ -1029,7 +1043,13 @@ export async function installCatalogBatch(ids: string[], catalog: Catalog, opts:
                 ? CANCELLED_MESSAGE
                 : e instanceof InstallError ? e.message : `${entry.name} could not be installed.`;
             if (!cancelled && !(e instanceof InstallError)) console.error('[plugin-installer] unexpected install failure', e);
-            results.push({ id, name: entry.name, success: false, message });
+            results.push({
+                id,
+                name: entry.name,
+                success: false,
+                message,
+                ...(e instanceof InstallError && e.networkRequired && !cancelled ? { networkRequired: true } : {}),
+            });
             emit(opts, { id, name: entry.name, phase: cancelled ? 'cancelled' : 'failed' });
         }
     }

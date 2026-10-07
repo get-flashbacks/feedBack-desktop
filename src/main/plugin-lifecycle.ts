@@ -142,6 +142,8 @@ export interface RefusedInstall {
     name: string;
     success: false;
     message: string;
+    /** Set only when the failure is a connectivity problem (see BatchItemResult). */
+    networkRequired?: boolean;
 }
 
 /**

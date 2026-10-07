@@ -177,12 +177,18 @@
     const catalogSelection = new Set();
     const catalogState = new Map(); // id -> {received, total}
     const catalogDependencyInfo = $('pm-catalog-deps');
+    // Checkbox handles for the install list, keyed by plugin id: the resolver
+    // state (auto-added dependencies, pruned conflicts) is mirrored onto the
+    // rows through this map rather than by re-querying the DOM, so a row's
+    // locked/checked state always comes from one place.
+    const catalogBoxById = new Map(); // id -> {box, entry, staticDisabled, incompatible, incompatibleReason}
     let catalogBusy = false;
 
     function showCatalogMessage(msg, success) {
         if (!catalogMsg) return;
         catalogMsg.textContent = msg;
-        catalogMsg.className = `mt-2 text-sm ${success ? 'text-emerald-400' : 'text-red-400'}`;
+        // pre-line so a multi-failure run can list each plugin on its own line.
+        catalogMsg.className = `mt-2 text-sm whitespace-pre-line ${success ? 'text-emerald-400' : 'text-red-400'}`;
         catalogMsg.classList.remove('hidden');
     }
 
@@ -219,6 +225,7 @@
                 return;
             }
             catalogBox.innerHTML = '';
+            catalogBoxById.clear();
             for (const entry of catalog) {
                 const selection = entry.selection || {};
                 // An entry with a different installed version is an upgrade, not
@@ -233,6 +240,7 @@
                 const box = document.createElement('input');
                 box.type = 'checkbox';
                 box.className = 'mt-1 accent-emerald-500';
+                box.dataset.pluginId = entry.id;
                 // Essentials ship with the app, and bundled entries ship with the
                 // app too — the installer refuses to place a second copy.
                 // A pinned or disabled plugin is installed too, and main refuses to
@@ -240,8 +248,16 @@
                 // Enable instead, so the checkbox is off rather than a dead end.
                 // A copy the catalog is behind is refused the same way — that
                 // install is a downgrade, and the row offers Downgrade instead.
+                // An entry that does not fit this build is disabled with the
+                // same reason the browse card shows: its install would land a
+                // plugin the backend cannot load (main refuses it as well).
                 const held = !!entry.pinned || !!entry.disabled || entry.updateStatus === 'ahead';
-                box.disabled = !installable || entry.bundled || selection.tier === 'essential' || held;
+                const incompatible = !!entry.compat && entry.compat.ok === false;
+                const incompatibleReason = incompatible
+                    ? (entry.compat.reason || 'This plugin does not fit this build.')
+                    : '';
+                const staticDisabled = !installable || entry.bundled || selection.tier === 'essential' || held || incompatible;
+                box.disabled = staticDisabled;
                 if (box.disabled) catalogSelection.delete(entry.id);
                 box.checked = catalogSelection.has(entry.id);
                 box.addEventListener('change', async () => {
@@ -250,6 +266,11 @@
                     updateInstallLabel();
                     await updateDependencyInfo();
                 });
+                // Static facts about the row are kept beside its checkbox so the
+                // resolver-driven state below can restore them after each
+                // resolve: the same handle is what the install plan summary
+                // reads, and `staticDisabled` never changes per selection.
+                catalogBoxById.set(entry.id, { box, entry, staticDisabled, incompatible, incompatibleReason });
 
                 const meta = document.createElement('div');
                 meta.className = 'flex-1 min-w-0';
@@ -268,6 +289,7 @@
                         ${esc(entry.category || '')}${Array.isArray(entry.instruments) && entry.instruments.length ? ' · ' + esc(entry.instruments.join(', ')) : ''}
                         ${entry.size ? ' · ' + Math.max(1, Math.round(entry.size.downloadBytes / 1024)) + ' KB' : ''}
                     </div>
+                    ${incompatible ? `<div class="text-xs text-red-300 mt-0.5">${esc(incompatibleReason)}</div>` : ''}
                 `;
 
                 row.appendChild(box);
@@ -421,48 +443,133 @@
             : 'Install selected';
     }
 
+    // Human size for the resolved set's transfer. Same rounding as the setup
+    // wizard's formatSize() (wizard.js), so both screens price a download the
+    // same way and one of them cannot quietly drift from the other.
+    function downloadSizeLabel(bytes) {
+        if (!Number.isFinite(bytes) || bytes <= 0) return '';
+        const mb = bytes / (1024 * 1024);
+        if (mb >= 1) return mb.toFixed(1) + ' MB';
+        return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+    }
+
+    // The resolver state, mirrored onto the rows the moment it is known:
+    //
+    //  - every dependency something ticked requires is LOCKED (and, when the
+    //    user never picked it, adopted into the set with a tick and an
+    //    explanation of who required it), computed from the ticked set plus the
+    //    catalog's own declarations — never from the per-request resolver map,
+    //    which stops reporting the edge once an adopted dependency joins the
+    //    selection and would otherwise silently unlock it;
+    //  - an entry the conflict pass pruned is unticked — a box that stays
+    //    ticked while the plan drops it would read as installed;
+    //  - everything else returns to its static state from the last row build.
+    //
+    // This is also how "prevent deselecting a dependency while another selected
+    // plugin requires it" works: the lock lives on the box until unticking
+    // whatever required it releases it on the next resolve.
+    function planLocks() {
+        const lockedBy = new Map(); // dependency id -> [plugins in the set that declare it]
+        for (const id of catalogSelection) {
+            const handle = catalogBoxById.get(id);
+            const deps = handle && Array.isArray(handle.entry.dependencies) ? handle.entry.dependencies : [];
+            for (const dep of deps) {
+                if (dep === id || !catalogBoxById.has(dep)) continue;
+                lockedBy.set(dep, [...(lockedBy.get(dep) || []), id]);
+            }
+        }
+        return lockedBy;
+    }
+
+    function mirrorPlanOntoRows(plan) {
+        const lockedBy = planLocks();
+        const pruned = ((plan && plan.conflicts) || []).filter(c => c && c.dropped);
+
+        for (const handleEntry of catalogBoxById) {
+            const id = handleEntry[0];
+            const handle = handleEntry[1];
+            if (lockedBy.has(id)) {
+                const by = lockedBy.get(id);
+                handle.box.disabled = true;
+                // An entry already on disk (bundled, or held) is not adopted as
+                // a selection: its checkbox is static and the row already says
+                // what is on it.
+                if (!handle.staticDisabled && !catalogSelection.has(id)) {
+                    handle.box.checked = true;
+                    catalogSelection.add(id);
+                }
+            } else if (pruned.some((c) => c.dropped === id)) {
+                handle.box.disabled = handle.staticDisabled;
+                handle.box.checked = false;
+                catalogSelection.delete(id);
+            } else {
+                handle.box.disabled = handle.staticDisabled;
+                handle.box.checked = catalogSelection.has(id);
+            }
+        }
+        const locked = [...lockedBy].map(([id, by]) => ({ id, by }));
+        return { locked, pruned };
+    }
+
     async function updateDependencyInfo() {
         if (!catalogDependencyInfo) return;
         const ids = [...catalogSelection];
         if (!ids.length) {
             catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
+            updateInstallLabel();
             return;
         }
         try {
             const plan = await plugins.resolveCatalog(ids);
-            const req = plan && plan.required ? plan.required : {};
-            const added = [];
-            for (const id of ids) {
-                // required is Record<string, string[]> from main; only arrays
-                // are iterated so a prototype-chain value can never be walked
-                // (Object injection sink on IPC-shaped data).
-                const deps = req[id];
-                if (Array.isArray(deps)) {
-                    for (const d of deps) if (!catalogSelection.has(d) && added.indexOf(d) === -1) added.push(d);
-                }
+            const { locked, pruned } = mirrorPlanOntoRows(plan);
+            updateInstallLabel();
+
+            const names = new Map();
+            for (const handleEntry of catalogBoxById) {
+                names.set(handleEntry[0], handleEntry[1].entry.name || handleEntry[0]);
             }
-            // What the resolver prunes, said before anything is downloaded. A
-            // keeper named is a clash; no keeper is the cascade that followed
-            // some other drop.
-            const dropped = ((plan && plan.conflicts) || []).filter(c => c && c.dropped);
-            const notes = [];
-            if (added.length) {
-                notes.push('Automatically selected required dependencies: ' + added.join(', ') + '.');
+            const nameOf = (id) => names.get(id) || id;
+
+            // The final resolved installation set, visible before the install
+            // button confirms it: names in install order (dependencies first),
+            // what was added as a dependency and why, what the conflict pass
+            // left out, and the transfer size — which is also the honest place
+            // to say a network connection is required, because the catalog
+            // itself is browsed from disk.
+            const lines = [];
+            const resolvedIds = plan && Array.isArray(plan.ids) ? plan.ids : [];
+            if (resolvedIds.length) {
+                lines.push('Install set (' + resolvedIds.length + '): ' + resolvedIds.map(nameOf).join(', ') + '.');
             }
-            if (dropped.length) {
-                notes.push('Will not install: ' + dropped.map(c => c.kept
-                    ? `${c.dropped} conflicts with ${c.kept}`
-                    : `${c.dropped} depends on something that was dropped`).join('; ') + '.');
+            if (locked.length) {
+                lines.push('Required by the selection: '
+                    + locked.map(entry => nameOf(entry.id) + ' (required by ' + entry.by.map(nameOf).join(', ') + ')').join('; ') + '.');
             }
-            if (notes.length) {
-                catalogDependencyInfo.textContent = notes.join(' ');
+            if (pruned.length) {
+                // What the resolver prunes, said before anything is downloaded. A
+                // keeper named is a clash; no keeper is the cascade that followed
+                // some other drop.
+                lines.push('Will not install: ' + pruned.map(c => c.kept
+                    ? nameOf(c.dropped) + ' conflicts with ' + nameOf(c.kept)
+                    : nameOf(c.dropped) + ' depends on something that was dropped').join('; ') + '.');
+            }
+            const outstanding = plan && Array.isArray(plan.outstanding) ? plan.outstanding.length : 0;
+            if (outstanding) {
+                const size = plan && Number.isFinite(plan.downloadBytes) ? ' (~' + downloadSizeLabel(plan.downloadBytes) + ')' : '';
+                lines.push(outstanding + (outstanding === 1 ? ' download' : ' downloads') + size
+                    + '. Installing requires a network connection; the catalog itself stays available offline.');
+            }
+            if (lines.length) {
+                catalogDependencyInfo.textContent = lines.join('\n');
                 catalogDependencyInfo.classList.remove('hidden');
                 return;
             }
             catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
         } catch (e) {
+            // A resolver that cannot answer must not pretend the plan is fine:
+            // the user is told to retry rather than being left with a stale note.
             catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
         }
@@ -487,11 +594,38 @@
             });
             try {
                 const result = await plugins.installCatalog(ids);
-                const failed = Array.isArray(result.results) ? result.results.filter(r => !r.success) : [];
-                for (const item of failed) showCatalogMessage(item.message, false);
-                if (!failed.length) showCatalogMessage(result.message, result.success);
-                catalogSelection.clear();
-                if (catalogDependencyInfo) {
+                const results = Array.isArray(result.results) ? result.results : [];
+                const failed = results.filter(r => !r.success);
+                // A failed install is recoverable, not a reset: the selection stays
+                // (minus what actually landed) so retrying is one click. Only a run
+                // with nothing failed clears the list.
+                for (const item of results) {
+                    if (item.success) catalogSelection.delete(item.id);
+                }
+                if (!failed.length) catalogSelection.clear();
+
+                const offline = result.networkRequired === true
+                    || (failed.length > 0 && failed.every(r => r.networkRequired === true));
+                if (offline) {
+                    // Browsing never needs this message — the catalog reads from
+                    // disk — but the download does, and a dead connection is
+                    // reported as that rather than as a broken install.
+                    showCatalogMessage(
+                        'A network connection is required to install plugins. Reconnect and try again — your selection is kept.\n'
+                        + failed.map(r => (r.name || r.id) + ': ' + (r.message || '')).join('\n'),
+                        false,
+                    );
+                } else if (failed.length) {
+                    showCatalogMessage(
+                        (result.message || 'The install did not finish.') + '\n'
+                        + failed.map(r => (r.name || r.id) + ': ' + (r.message || '')).join('\n'),
+                        false,
+                    );
+                } else {
+                    showCatalogMessage(result.message || 'Done.', result.success);
+                }
+
+                if (result.success && catalogDependencyInfo) {
                     catalogDependencyInfo.classList.add('hidden');
                     catalogDependencyInfo.textContent = '';
                 }
@@ -504,6 +638,9 @@
                 catalogState.clear();
                 catalogProgressWrap.classList.add('hidden');
                 setCatalogBusy(false);
+                // setCatalogBusy(false) resets the label to the plain form; a
+                // kept selection (a failed install) must put its count back.
+                updateInstallLabel();
             }
         });
     }
@@ -953,7 +1090,8 @@
             }
             catalogFiltersEl.querySelectorAll('input[data-facet]').forEach((input) => { input.checked = false; });
             renderCatalog();
-            if (catalogDependencyInfo) { catalogDependencyInfo.classList.add('hidden'); catalogDependencyInfo.textContent = ''; }
+            // The install plan belongs to the ticked selection below, not to
+            // the browse filters — clearing those must not hide it.
         });
     }
 
