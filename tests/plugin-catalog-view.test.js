@@ -1,8 +1,10 @@
-// Read-only catalog view (issue #15). src/renderer/plugin-manager/screen.js
-// carries its search and filter semantics in four IIFE-free functions so this
-// suite can lift them out by source and pin them without a DOM or a browser:
-// pmCatalogState, pmCatalogHaystack, pmCatalogFacets and pmFilterCatalog.
-// The view is the only thing tested here — installing is issue #18 (4/5).
+// Read-only catalog view (issue #15) and its cards (issue #16, catalog UI
+// 2/5). src/renderer/plugin-manager/screen.js carries its search, filter and
+// badge semantics in five IIFE-free functions so this suite can lift them out
+// by source and pin them: pmCatalogState, pmCatalogBadges, pmCatalogHaystack,
+// pmCatalogFacets and pmFilterCatalog. The rendered card itself is checked
+// through a DOM stub below — the view is all that is tested here; installing
+// is issue #18 (4/5).
 
 'use strict';
 
@@ -16,10 +18,22 @@ const ROOT = path.join(__dirname, '..');
 const SCREEN_JS = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'plugin-manager', 'screen.js'), 'utf8');
 const CATALOG_JSON = path.join(ROOT, 'resources', 'plugin-catalog.json');
 
+const { loadTs } = require('./_load-ts');
+const { PLUGIN_API_VERSION, compatibilityFor } = loadTs('src/main/plugin-compat.ts');
+
+// The verdict this build's listCatalog() would reach for the fixture's
+// declaration, computed by the real rule rather than copied: a phrasing change
+// in plugin-compat.ts would otherwise leave the fixture — and every card
+// assertion built on it — quietly stale while the app said something else.
+const FIXTURE_BUILD = {
+    coreVersion: JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version,
+    pluginApiVersion: PLUGIN_API_VERSION,
+};
+
 // Same brace-matching lift the audio screen suite uses: the function text is
-// compiled as-is, so these four must stay free of template literals (their
+// compiled as-is, so these five must stay free of template literals (their
 // braces would confuse the counter) and of any reference to the IIFE scope.
-const PURE_FUNCTIONS = ['pmCatalogState', 'pmCatalogHaystack', 'pmCatalogFacets', 'pmFilterCatalog'];
+const PURE_FUNCTIONS = ['pmCatalogState', 'pmCatalogBadges', 'pmCatalogHaystack', 'pmCatalogFacets', 'pmFilterCatalog'];
 
 function extractFunction(src, name) {
     const sig = `function ${name}(`;
@@ -43,7 +57,7 @@ function loadView() {
     return vm.runInThisContext(
         '(() => {\n'
         + PURE_FUNCTIONS.map((name) => extractFunction(SCREEN_JS, name)).join('\n')
-        + '\nreturn { pmCatalogState, pmCatalogHaystack, pmCatalogFacets, pmFilterCatalog };\n'
+        + '\nreturn { pmCatalogState, pmCatalogBadges, pmCatalogHaystack, pmCatalogFacets, pmFilterCatalog };\n'
         + '})()'
     );
 }
@@ -75,6 +89,12 @@ function entry(overrides) {
         bundled: false,
         activeSource: 'none',
         canRollback: false,
+        // The verdict listCatalog() derives from the declaration above against
+        // this build — the shape src/main/plugin-compat.ts produces.
+        compat: compatibilityFor(
+            { name: 'Example', compatibility: { minCoreVersion: '0.3.0', minPluginApiVersion: '1' } },
+            FIXTURE_BUILD
+        ),
         ...overrides,
     };
 }
@@ -141,8 +161,8 @@ function search(rows, query, overrides) {
 
 // ── The script parses as a whole ─────────────────────────────────────
 
-test('screen.js parses as a whole, not just the four lifted functions', () => {
-    // loadView() only compiles the four lifted functions, so everything else in
+test('screen.js parses as a whole, not just the five lifted functions', () => {
+    // loadView() only compiles the five lifted functions, so everything else in
     // the IIFE — including the shared esc() helper — is unchecked here. A merge
     // that reintroduced a duplicate `const esc` parsed fine in isolation and
     // still threw a SyntaxError in the renderer, blanking the whole screen.
@@ -372,11 +392,270 @@ test('the row fields this suite builds are the ones plugins:catalog sends', () =
     const start = main.indexOf('function listCatalog(');
     assert.ok(start !== -1, 'listCatalog should exist in plugin-manager.ts');
     const listCatalogSource = main.slice(start, main.indexOf('\n}\n', start));
-    for (const field of ['installedVersion', 'bundled', 'activeSource', 'canRollback']) {
+    for (const field of ['installedVersion', 'bundled', 'activeSource', 'canRollback', 'compat']) {
         assert.ok(listCatalogSource.includes(field), `listCatalog should attach '${field}' to every row`);
     }
     // The error state depends on the handler being able to report a failure at
     // all, rather than answering a bare empty array.
     assert.match(listCatalogSource, /ok: false/);
     assert.match(listCatalogSource, /ok: true/);
+});
+
+// ── Card badges ──────────────────────────────────────────────────────
+
+function labels(entry) {
+    return view.pmCatalogBadges(entry).map((badge) => badge.label);
+}
+
+test('badges distinguish the three sources the backend can load', () => {
+    // The activeSource of src/main/plugin-precedence.ts, made visible: which
+    // copy is on disk decides which badge the card wears, not just install
+    // state. Each badge explains itself, because "writable override" means
+    // nothing without the precedence rule.
+    assert.deepEqual(labels(entry({ activeSource: 'bundled', bundled: true })), ['Bundled']);
+    assert.deepEqual(labels(entry({ activeSource: 'installed', installedVersion: '1.0.0' })), ['Installed']);
+    assert.deepEqual(
+        labels(entry({ activeSource: 'writable-override', installedVersion: '1.0.0' })),
+        ['Writable override']
+    );
+    for (const badge of view.pmCatalogBadges(entry({ activeSource: 'writable-override', installedVersion: '1.0.0' }))) {
+        assert.ok(badge.title, 'every source badge explains what its source means');
+    }
+    assert.equal(
+        view.pmCatalogBadges(entry({ activeSource: 'writable-override' }))[0].title,
+        'Your copy shadows a packaged plugin with the same id, so the backend loads yours.'
+    );
+});
+
+test('state badges cover available and update-available; installed needs no second badge', () => {
+    assert.deepEqual(labels(entry()), ['Available']);
+    assert.deepEqual(labels(entry({ installedVersion: '0.9.0' })), ['Update available']);
+    // The installed copy already carries the "Installed" source badge — a
+    // second one would just repeat it.
+    assert.deepEqual(labels(entry({ activeSource: 'installed', installedVersion: '1.0.0' })), ['Installed']);
+    assert.deepEqual(labels(entry({ bundled: true, activeSource: 'bundled' })), ['Bundled']);
+});
+
+test('a source badge claiming presence suppresses the contradictory "Available" badge', () => {
+    // activeSource reports 'bundled' for any packaged copy, including one whose
+    // manifest does not claim bundled: true (docs/PLUGIN_CATALOG.md), and a
+    // git-installed copy need not carry a version — so pmCatalogState can say
+    // "available" for a plugin that is very much on disk. One card must not
+    // wear two badges that disagree about that.
+    assert.deepEqual(
+        labels(entry({ bundled: false, activeSource: 'bundled' })),
+        ['Bundled']
+    );
+    assert.deepEqual(
+        labels(entry({ activeSource: 'installed', installedVersion: null })),
+        ['Installed']
+    );
+    // Nothing on disk still earns "Available": no source badge claims it.
+    assert.deepEqual(labels(entry({ activeSource: 'none', installedVersion: null })), ['Available']);
+});
+
+test('an incompatible entry is badged first, before any status or tier', () => {
+    const incompatible = entry({
+        activeSource: 'writable-override',
+        installedVersion: '0.9.0',
+        selection: { tier: 'recommended', defaultSelected: true },
+        compat: {
+            ok: false,
+            requirements: 'fee[dB]ack core 0.4.0 or newer',
+            reason: 'Example needs fee[dB]ack core 0.4.0 or newer; this build ships 0.3.0.',
+        },
+    });
+    assert.deepEqual(labels(incompatible), [
+        'Incompatible', 'Writable override', 'Update available', 'Recommended',
+    ]);
+});
+
+test('tier badges separate a recommendation from an essential, non-optional plugin', () => {
+    // The colour pairing is the point: a recommendation must never wear the
+    // sky colour reserved for "ships with the app / locked into every plan".
+    const essential = view.pmCatalogBadges(entry({ selection: { tier: 'essential', defaultSelected: true } }));
+    const recommended = view.pmCatalogBadges(entry({ selection: { tier: 'recommended', defaultSelected: true } }));
+    assert.deepEqual(essential.map((badge) => badge.label), ['Available', 'Essential']);
+    assert.deepEqual(recommended.map((badge) => badge.label), ['Available', 'Recommended']);
+    assert.equal(essential[1].cls, 'bg-sky-900/40 text-sky-300');
+    assert.equal(recommended[1].cls, 'bg-indigo-900/40 text-indigo-300');
+    assert.notEqual(essential[1].cls, recommended[1].cls);
+    // An optional plugin claims neither.
+    assert.deepEqual(labels(entry()), ['Available']);
+});
+
+// ── The rendered card ────────────────────────────────────────────────
+
+// Whole-screen stub, the same shape tests/renderer-html-escaping.test.js uses
+// for this script: elements auto-create on getElementById and innerHTML is a
+// plain string, so the assertions read exactly what the screen handed the DOM.
+function makeElement(tag = 'div') {
+    const el = {
+        tagName: String(tag).toUpperCase(),
+        className: '',
+        textContent: '',
+        id: '',
+        type: '',
+        value: '',
+        disabled: false,
+        checked: false,
+        dataset: {},
+        children: [],
+        handlers: {},
+        style: {},
+        classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+        appendChild(child) { el.children.push(child); return child; },
+        addEventListener(type, fn) { (el.handlers[type] = el.handlers[type] || []).push(fn); },
+    };
+    let html = '';
+    Object.defineProperty(el, 'innerHTML', {
+        get() { return html; },
+        set(value) { html = String(value); el.children.length = 0; },
+    });
+    el.querySelectorAll = (selector) => descendants(el).filter((node) => matchesClass(node, selector));
+    el.querySelector = (selector) => el.querySelectorAll(selector)[0] || null;
+    return el;
+}
+
+function descendants(el, found = []) {
+    for (const child of el.children) {
+        found.push(child);
+        descendants(child, found);
+    }
+    return found;
+}
+
+// Only the `.class` selector form this screen uses.
+function matchesClass(node, selector) {
+    if (!selector.startsWith('.')) throw new Error(`stub query does not handle '${selector}'`);
+    return String(node.className).split(/\s+/).includes(selector.slice(1));
+}
+
+function makeDocument() {
+    const byId = new Map();
+    return {
+        getElementById(id) {
+            if (!byId.has(id)) byId.set(id, makeElement());
+            return byId.get(id);
+        },
+        createElement: (tag) => makeElement(tag),
+    };
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+// Load the whole screen with the given catalog rows and return the browse
+// list's HTML once both startup loads (installed list and catalog) have
+// drained. Two flushes mirror the sibling suite: the second catches the chain
+// that awaits the first.
+async function renderedCatalog(entries) {
+    const document = makeDocument();
+    const plugins = {
+        listInstalled: () => Promise.resolve([]),
+        catalog: () => Promise.resolve({ ok: true, entries }),
+        remove: async () => ({ success: true, message: 'Removed.' }),
+        update: async () => ({ success: true, message: 'Updated.' }),
+    };
+    const sandbox = {
+        window: { feedBackDesktop: { plugins } },
+        document,
+        setTimeout: () => 0,
+        clearTimeout: () => {},
+        confirm: () => true,
+        globalThis: undefined,
+    };
+    sandbox.globalThis = sandbox;
+    vm.runInNewContext(SCREEN_JS, sandbox, { filename: 'plugin-manager/screen.js' });
+    await flush();
+    await flush();
+    return document.getElementById('pm-catalog-list').innerHTML;
+}
+
+test('a card shows name, version, description and the catalog facts from issue #16', async () => {
+    const html = await renderedCatalog([entry()]);
+    assert.ok(html.includes('Example'), 'name');
+    assert.ok(html.includes('v1.0.0'), 'version');
+    assert.ok(html.includes('An example plugin.'), 'description');
+    // category · instruments · source · stability · download size, as one line.
+    assert.ok(html.includes('practice · guitar · get-flashbacks · Stable · 1 KB download'), `meta line, got:\n${html}`);
+});
+
+test('a fitting card states the requirements of this build', async () => {
+    const html = await renderedCatalog([entry()]);
+    assert.ok(
+        html.includes('Requires fee[dB]ack core 0.3.0 or newer, plugin API 1 or newer'),
+        `requirements line, got:\n${html}`
+    );
+    assert.ok(!html.includes('Incompatible'), 'a fitting entry is not badged as incompatible');
+});
+
+test('an incompatible card leads with the badge and the reason, not just a mark', async () => {
+    const html = await renderedCatalog([entry({
+        name: 'Future Thing',
+        compat: {
+            ok: false,
+            requirements: 'fee[dB]ack core 0.4.0 or newer',
+            reason: 'Future Thing needs fee[dB]ack core 0.4.0 or newer; this build ships 0.3.0.',
+        },
+    })]);
+    assert.ok(html.includes('Incompatible'), 'the badge');
+    assert.ok(
+        html.includes('Future Thing needs fee[dB]ack core 0.4.0 or newer; this build ships 0.3.0.'),
+        `the reason, got:\n${html}`
+    );
+    // The failure replaces the requirements line — the card does not claim the
+    // plugin fits while explaining that it does not.
+    assert.ok(!html.includes('Requires fee[dB]ack'), `no requirements line, got:\n${html}`);
+});
+
+test('cards distinguish bundled, installed and writable-override copies', async () => {
+    const html = await renderedCatalog([
+        entry({ id: 'bundled-one', name: 'Bundled One', bundled: true, activeSource: 'bundled' }),
+        entry({ id: 'installed-one', name: 'Installed One', installedVersion: '1.0.0', activeSource: 'installed' }),
+        entry({ id: 'override-one', name: 'Override One', installedVersion: '1.0.0', activeSource: 'writable-override' }),
+    ]);
+    assert.ok(html.includes('Bundled'), 'the bundled card wears the bundled badge');
+    assert.ok(html.includes('Installed'), 'the installed card wears the installed badge');
+    assert.ok(html.includes('Writable override'), 'the override card wears the override badge');
+    assert.ok(html.includes('title="Your copy shadows a packaged plugin with the same id'), 'and explains precedence');
+});
+
+test('a card separates hard requirements from recommendations', async () => {
+    const html = await renderedCatalog([
+        entry({
+            name: 'Dependent',
+            dependencies: ['chords-core'],
+            selection: { tier: 'recommended', defaultSelected: true },
+        }),
+        entry({
+            id: 'essential-one',
+            name: 'Essential One',
+            selection: { tier: 'essential', defaultSelected: true },
+        }),
+    ]);
+    // Declared dependencies are installed whether or not anything recommends
+    // the plugin, so they get their own explicit line.
+    assert.ok(html.includes('Requires: chords-core'), `dependency line, got:\n${html}`);
+    assert.ok(html.includes('Recommended'), 'the tier badge');
+    assert.ok(html.includes('Essential'), 'the non-optional tier badge');
+    // The recommendation is a badge, the dependency is a line: two different
+    // affordances, so "Recommended" cannot read as "required".
+    assert.ok(!html.includes('Requires: Recommended'), 'a tier is never phrased as a requirement');
+});
+
+test('every catalog field on a card arrives escaped, never as markup', async () => {
+    const hostile = '<img src=x onerror="alert(1)">';
+    const html = await renderedCatalog([entry({
+        name: hostile,
+        description: '<b>desc</b>',
+        compat: {
+            ok: false,
+            requirements: '',
+            reason: `${hostile} & <script>`,
+        },
+    })]);
+    assert.ok(!html.includes('<img'), `no raw tag, got:\n${html}`);
+    assert.ok(!html.includes('<script>'), 'the reason is escaped too');
+    assert.ok(html.includes('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;'), 'escaped, not dropped');
+    assert.ok(html.includes('&lt;b&gt;desc&lt;/b&gt;'), 'description escaped, not dropped');
 });

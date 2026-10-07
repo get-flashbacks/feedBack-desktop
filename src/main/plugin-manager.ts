@@ -45,6 +45,7 @@ import {
     rollbackInstall,
 } from './plugin-installer';
 import { activeSourceFor, scanPluginCopies, type PluginCopy } from './plugin-precedence';
+import { PLUGIN_API_VERSION, compatibilityFor } from './plugin-compat';
 import {
     IPC_PLUGIN_CATALOG_CANCEL,
     IPC_PLUGIN_CATALOG_PROGRESS,
@@ -601,6 +602,10 @@ export function listCatalog(): { ok: boolean; entries: unknown[]; message?: stri
     const pluginsDir = getPluginsDir();
     const overrides = scanPluginCopies(pluginsDir);
     const baselines = scanPluginCopies(getCorePluginsDir());
+    // One compatibility answer per row, decided here rather than in the
+    // renderer: the desktop ships the core, so its own version is the core
+    // build every entry is judged against (see plugin-compat.ts).
+    const build = { coreVersion: app.getVersion(), pluginApiVersion: PLUGIN_API_VERSION };
     return {
         ok: true,
         entries: catalog.entries.map(entry => {
@@ -608,6 +613,7 @@ export function listCatalog(): { ok: boolean; entries: unknown[]; message?: stri
             const override = overrides.get(entry.id) ?? null;
             return {
                 ...entry,
+                compat: compatibilityFor(entry, build),
                 installedVersion: override?.version ?? null,
                 bundled: baseline?.bundled === true,
                 activeSource: activeSourceFor(baseline, override),

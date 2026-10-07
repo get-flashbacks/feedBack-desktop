@@ -11,6 +11,18 @@ const test = require('node:test');
 const { loadTs, ROOT } = require('./_load-ts');
 
 const selection = loadTs('src/main/plugin-selection.ts');
+const { PLUGIN_API_VERSION, compatibilityFor } = loadTs('src/main/plugin-compat.ts');
+
+// The verdict plugins:catalog attaches to a row (the selection layer ignores
+// it; the row carries it), computed by the real rule so this fixture cannot
+// drift from what src/main/plugin-compat.ts actually produces.
+const CATALOG_ROW_COMPAT = compatibilityFor(
+    { name: 'ROW', compatibility: { minCoreVersion: '0.3.0', minPluginApiVersion: '1' } },
+    {
+        coreVersion: JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version,
+        pluginApiVersion: PLUGIN_API_VERSION,
+    }
+);
 
 /** Build a catalog row the way `plugins:catalog` projects it. */
 function row(id, overrides = {}) {
@@ -28,6 +40,7 @@ function row(id, overrides = {}) {
         instruments: overrides.instruments ?? [],
         stability: 'stable',
         compatibility: { minCoreVersion: '0.3.0', minPluginApiVersion: '1' },
+        compat: { ...CATALOG_ROW_COMPAT },
         dependencies: overrides.dependencies ?? [],
         conflicts: overrides.conflicts ?? [],
         size: {
