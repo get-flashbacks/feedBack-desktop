@@ -55,6 +55,9 @@ function makeElement(tag = 'div') {
         classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
         appendChild(child) { el.children.push(child); return child; },
         addEventListener(type, fn) { (el.handlers[type] = el.handlers[type] || []).push(fn); },
+        attributes: {},
+        setAttribute(name, value) { el.attributes[name] = String(value); },
+        getAttribute(name) { return Object.prototype.hasOwnProperty.call(el.attributes, name) ? el.attributes[name] : null; },
     };
 
     let html = '';

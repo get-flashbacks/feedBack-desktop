@@ -543,6 +543,9 @@ function makeElement(tag = 'div') {
         classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
         appendChild(child) { el.children.push(child); return child; },
         addEventListener(type, fn) { (el.handlers[type] = el.handlers[type] || []).push(fn); },
+        attributes: {},
+        setAttribute(name, value) { el.attributes[name] = String(value); },
+        getAttribute(name) { return Object.prototype.hasOwnProperty.call(el.attributes, name) ? el.attributes[name] : null; },
     };
     let html = '';
     Object.defineProperty(el, 'innerHTML', {
@@ -1013,4 +1016,119 @@ test('the screen never writes plugin files itself — every action goes through 
     }
     assert.ok(bridged.has('installCatalog') && bridged.has('resolveCatalog'),
         'the bridge exposes the catalog install and resolution the screen wires');
+});
+// ── Accessibility pass (issue #19, catalog UI 5/5) ─────────────────────
+//
+// Disabled entries must expose their explanation to assistive technology, not
+// only visually, and the states that change while a row stays put (a lock the
+// resolver places, an incompatibility) get a describedby target rather than a
+// tooltip alone.
+
+test('a disabled install row exposes its reason to assistive tech, not only visually', async () => {
+    const { document } = await runScreen([entry({
+        id: 'future',
+        name: 'Future Thing',
+        compat: {
+            ok: false,
+            requirements: 'fee[dB]ack core 0.4.0 or newer',
+            reason: 'Future Thing needs fee[dB]ack core 0.4.0 or newer; this build ships 0.3.0.',
+        },
+    })]);
+    const row = document.getElementById('pm-catalog').children[0];
+    const box = row.children[0];
+    const meta = row.children[1];
+
+    assert.equal(box.disabled, true);
+    assert.equal(
+        box.title,
+        'Future Thing needs fee[dB]ack core 0.4.0 or newer; this build ships 0.3.0.',
+        'the control itself carries the reason'
+    );
+    const describedBy = box.getAttribute('aria-describedby') || '';
+    assert.ok(describedBy.split(' ').includes('pm-row-reason-future'), `points at the reason line, got '${describedBy}'`);
+    assert.ok(
+        meta.innerHTML.includes('id="pm-row-reason-future"'),
+        `the reason line the description points at exists, got:\n${meta.innerHTML}`
+    );
+});
+
+test('a locked dependency says who requires it and how to release it, for eyes and for a screen reader', async () => {
+    const { document } = await runScreen(
+        [entry({ id: 'alpha', name: 'Practice Alpha', dependencies: ['core'] }), entry({ id: 'core', name: 'Core' })],
+        { plan: { ids: ['alpha', 'core'], outstanding: ['alpha', 'core'], required: {}, conflicts: [] } }
+    );
+    const list = document.getElementById('pm-catalog');
+    const alphaBox = list.children[0].children[0];
+    alphaBox.checked = true;
+    await alphaBox.handlers.change[0]();
+
+    const coreRow = list.children[1];
+    const coreBox = coreRow.children[0];
+    const lockLine = coreRow.children[1].children[0]; // the appended lock element
+    assert.equal(coreBox.disabled, true, 'the dependency cannot be deselected while Alpha needs it');
+    assert.equal(
+        lockLine.textContent,
+        'Locked into the plan: required by Practice Alpha. Untick Practice Alpha to remove it.',
+        'the explanation is visible text, not a tooltip alone'
+    );
+    assert.equal(coreBox.title, lockLine.textContent, 'the control carries the same words');
+    assert.ok(
+        (coreBox.getAttribute('aria-describedby') || '').split(' ').includes('pm-row-lock-core'),
+        'and points a screen reader at that line'
+    );
+    assert.equal(lockLine.id, 'pm-row-lock-core');
+
+    // Releasing the dependent clears the lock explanation instead of leaving a
+    // stale reason on an enabled box.
+    alphaBox.checked = false;
+    await alphaBox.handlers.change[0]();
+    assert.equal(coreBox.disabled, false, 'the lock is released with its dependent');
+    assert.equal(lockLine.textContent, '', 'the explanation goes with it');
+});
+
+test('static states name the control that undoes them', async () => {
+    const { document } = await runScreen([
+        entry({ id: 'pinned-one', name: 'Pinned One', pinned: true, installedVersion: '0.9.0', version: '1.0.0' }),
+        entry({ id: 'off-one', name: 'Disabled One', disabled: true, installedVersion: '1.0.0' }),
+        entry({ id: 'ahead-one', name: 'Ahead One', updateStatus: 'ahead', installedVersion: '2.0.0' }),
+        entry({ id: 'bundled-one', name: 'Bundled One', bundled: true, activeSource: 'bundled' }),
+    ]);
+    const list = document.getElementById('pm-catalog');
+    const titleOf = (i) => list.children[i].children[0].title;
+    assert.match(titleOf(0), /unpin/i, 'a pinned row points at Unpin');
+    assert.match(titleOf(1), /enable it/i, 'a disabled row points at Enable');
+    assert.match(titleOf(2), /downgrade/i, 'a copy the catalog is behind points at Downgrade');
+    assert.match(titleOf(3), /ships with the app/i, 'a bundled row says there is nothing to install');
+    for (let i = 0; i < 4; i++) assert.equal(list.children[i].children[0].disabled, true);
+});
+
+test('the fragment markup carries the accessibility wiring', () => {
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'plugin-manager', 'screen.html'), 'utf8');
+    // Keyboard users need a visible focus position; the host page provides no
+    // :focus-visible styling, so the panel brings its own, scoped to itself.
+    assert.match(html, /#plugin-manager-panel :focus-visible\s*{\s*outline:/, 'a visible focus ring is defined for the panel');
+    // Live regions: the plan note (selection + dependency state), the install
+    // outcome, the browse status, and the download progress.
+    assert.match(html, /id="pm-catalog-deps"[^>]*role="region"[^>]*aria-label="Installation plan"[^>]*aria-live="polite"/);
+    assert.match(html, /id="pm-catalog-msg"[^>]*role="status"[^>]*aria-live="polite"/);
+    assert.match(html, /id="pm-catalog-status"[^>]*role="status"[^>]*aria-live="polite"/);
+    assert.match(html, /id="pm-catalog-active"[^>]*role="status"[^>]*aria-live="polite"/);
+    assert.match(html, /id="pm-catalog-progress-text"[^>]*role="status"[^>]*aria-live="polite"/);
+    assert.match(html, /<progress[^>]*aria-label="Download progress"/);
+    // The install list is a labelled group, and the placeholder-only inputs
+    // have real accessible names.
+    assert.match(html, /id="pm-catalog"[^>]*role="group"[^>]*aria-label="Curated plugins to install"/);
+    assert.match(html, /id="pm-catalog-search"[^>]*aria-label="Search catalog plugins"/s);
+    assert.match(html, /id="pm-git-url"[^>]*aria-label="Plugin repository URL"/s);
+});
+
+test('no inline event handlers or tab-order overrides in the catalog markup', () => {
+    // Keyboard operability comes from native controls in document order;
+    // inline handlers and positive tabindex values are the two classic ways a
+    // fragment like this quietly breaks that.
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'plugin-manager', 'screen.html'), 'utf8');
+    assert.ok(!/\son(click|key\w+|mouse\w+|focus|blur)\s*=/i.test(html), 'no inline event handlers');
+    assert.ok(!/tabindex\s*=\s*["']?[1-9]/i.test(html), 'no positive tabindex overrides');
+    const js = SCREEN_JS;
+    assert.ok(!/\son(click|key\w+)\s*=/i.test(js), 'the screen script builds no inline handlers either');
 });

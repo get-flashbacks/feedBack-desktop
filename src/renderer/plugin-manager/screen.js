@@ -258,6 +258,24 @@
                     : '';
                 const staticDisabled = !installable || entry.bundled || selection.tier === 'essential' || held || incompatible;
                 box.disabled = staticDisabled;
+                // Every disabled box says why, in words assistive tech can
+                // reach: a tooltip on the control itself, plus — for the two
+                // reasons that can change while the row stays put (an
+                // incompatibility, a lock the resolver just placed) — a
+                // visible line the box points at with aria-describedby.
+                let staticReason = '';
+                if (incompatible) staticReason = incompatibleReason;
+                else if (entry.bundled) staticReason = 'Ships with the app; nothing to install.';
+                else if (selection.tier === 'essential') staticReason = 'Part of the core set; installed with the app.';
+                else if (entry.pinned) staticReason = 'Pinned — unpin it to install ' + entry.version + '.';
+                else if (entry.disabled) staticReason = 'Disabled. Enable it to install ' + entry.version + '.';
+                else if (entry.updateStatus === 'ahead') staticReason = 'The catalog is older than the copy installed. Use Downgrade to go back.';
+                else if (!installable) staticReason = 'Installed at this version already.';
+                if (staticReason) box.title = staticReason;
+                box.setAttribute('aria-describedby', [
+                    incompatible ? 'pm-row-reason-' + entry.id : '',
+                    'pm-row-lock-' + entry.id,
+                ].filter(Boolean).join(' '));
                 if (box.disabled) catalogSelection.delete(entry.id);
                 box.checked = catalogSelection.has(entry.id);
                 box.addEventListener('change', async () => {
@@ -266,11 +284,6 @@
                     updateInstallLabel();
                     await updateDependencyInfo();
                 });
-                // Static facts about the row are kept beside its checkbox so the
-                // resolver-driven state below can restore them after each
-                // resolve: the same handle is what the install plan summary
-                // reads, and `staticDisabled` never changes per selection.
-                catalogBoxById.set(entry.id, { box, entry, staticDisabled, incompatible, incompatibleReason });
 
                 const meta = document.createElement('div');
                 meta.className = 'flex-1 min-w-0';
@@ -289,8 +302,23 @@
                         ${esc(entry.category || '')}${Array.isArray(entry.instruments) && entry.instruments.length ? ' · ' + esc(entry.instruments.join(', ')) : ''}
                         ${entry.size ? ' · ' + Math.max(1, Math.round(entry.size.downloadBytes / 1024)) + ' KB' : ''}
                     </div>
-                    ${incompatible ? `<div class="text-xs text-red-300 mt-0.5">${esc(incompatibleReason)}</div>` : ''}
+                    ${incompatible ? `<div class="text-xs text-red-300 mt-0.5" id="pm-row-reason-${esc(entry.id)}">${esc(incompatibleReason)}</div>` : ''}
                 `;
+
+                // The lock explanation is its own element rather than template
+                // markup: the resolver rewrites it on every selection change,
+                // and the checkbox above points at its id with aria-describedby
+                // so a screen reader hears why the box is off, not just that
+                // it is. Empty + hidden until something requires this plugin.
+                const lockEl = document.createElement('div');
+                lockEl.id = 'pm-row-lock-' + entry.id;
+                lockEl.className = 'text-xs text-sky-300 mt-0.5 hidden';
+                meta.appendChild(lockEl);
+                // Static facts about the row are kept beside its checkbox so the
+                // resolver-driven state below can restore them after each
+                // resolve: the same handle is what the install plan summary
+                // reads, and `staticDisabled` never changes per selection.
+                catalogBoxById.set(entry.id, { box, entry, staticDisabled, staticReason, lockEl });
 
                 row.appendChild(box);
                 row.appendChild(meta);
@@ -484,13 +512,24 @@
     function mirrorPlanOntoRows(plan) {
         const lockedBy = planLocks();
         const pruned = ((plan && plan.conflicts) || []).filter(c => c && c.dropped);
+        const nameOf = (id) => {
+            const handle = catalogBoxById.get(id);
+            return handle && handle.entry.name ? handle.entry.name : id;
+        };
 
         for (const handleEntry of catalogBoxById) {
             const id = handleEntry[0];
             const handle = handleEntry[1];
             if (lockedBy.has(id)) {
-                const by = lockedBy.get(id);
+                const byNames = lockedBy.get(id).map(nameOf).join(', ');
+                // The lock is spoken, not just drawn: the line is what the
+                // checkbox's aria-describedby points at, so a screen reader
+                // hears who required this plugin and how to release it.
+                const lockText = 'Locked into the plan: required by ' + byNames + '. Untick ' + byNames + ' to remove it.';
                 handle.box.disabled = true;
+                handle.lockEl.textContent = lockText;
+                handle.lockEl.classList.remove('hidden');
+                if (!handle.staticDisabled) handle.box.title = lockText;
                 // An entry already on disk (bundled, or held) is not adopted as
                 // a selection: its checkbox is static and the row already says
                 // what is on it.
@@ -498,13 +537,18 @@
                     handle.box.checked = true;
                     catalogSelection.add(id);
                 }
-            } else if (pruned.some((c) => c.dropped === id)) {
-                handle.box.disabled = handle.staticDisabled;
-                handle.box.checked = false;
-                catalogSelection.delete(id);
             } else {
-                handle.box.disabled = handle.staticDisabled;
-                handle.box.checked = catalogSelection.has(id);
+                handle.lockEl.textContent = '';
+                handle.lockEl.classList.add('hidden');
+                handle.box.title = handle.staticReason;
+                if (pruned.some((c) => c.dropped === id)) {
+                    handle.box.disabled = handle.staticDisabled;
+                    handle.box.checked = false;
+                    catalogSelection.delete(id);
+                } else {
+                    handle.box.disabled = handle.staticDisabled;
+                    handle.box.checked = catalogSelection.has(id);
+                }
             }
         }
         const locked = [...lockedBy].map(([id, by]) => ({ id, by }));
