@@ -196,9 +196,11 @@
         if (!catalogProgressWrap) return;
         catalogProgressWrap.classList.remove('hidden');
         catalogProgress.value = percent;
-        catalogProgressText.textContent = percent >= 100
-            ? `${name} — installed.`
-            : `${name} — downloading… ${percent}%`;
+        if (catalogProgressText) {
+            catalogProgressText.textContent = percent >= 100
+                ? `${name} — installed.`
+                : `${name} — downloading… ${percent}%`;
+        }
     }
 
     function setCatalogBusy(busy) {
@@ -598,7 +600,6 @@
         if (!catalogDependencyInfo) return;
         const ids = [...catalogSelection];
         if (!ids.length) {
-            catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
             mirrorPlanOntoRows(null);
             updateInstallLabel();
@@ -646,10 +647,8 @@
             }
             if (lines.length) {
                 catalogDependencyInfo.textContent = lines.join('\n');
-                catalogDependencyInfo.classList.remove('hidden');
                 return;
             }
-            catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
         } catch (e) {
             // A resolver that cannot answer must not pretend the plan is fine:
