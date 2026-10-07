@@ -931,7 +931,7 @@ export interface BatchItemResult {
     name: string;
     success: boolean;
     message: string;
-    /** The failure was a connectivity problem, so as a whole it is retryable. */
+    /** If true, this failure was a connectivity problem and the item is retryable. */
     networkRequired?: boolean;
 }
 
