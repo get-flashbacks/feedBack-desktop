@@ -434,8 +434,12 @@
             const req = plan && plan.required ? plan.required : {};
             const added = [];
             for (const id of ids) {
-                if (req[id] && req[id].length) {
-                    for (const d of req[id]) if (!catalogSelection.has(d) && added.indexOf(d) === -1) added.push(d);
+                // required is Record<string, string[]> from main; only arrays
+                // are iterated so a prototype-chain value can never be walked
+                // (Object injection sink on IPC-shaped data).
+                const deps = req[id];
+                if (Array.isArray(deps)) {
+                    for (const d of deps) if (!catalogSelection.has(d) && added.indexOf(d) === -1) added.push(d);
                 }
             }
             // What the resolver prunes, said before anything is downloaded. A
