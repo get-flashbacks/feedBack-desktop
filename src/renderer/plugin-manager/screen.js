@@ -468,9 +468,13 @@
     // This is also how "prevent deselecting a dependency while another selected
     // plugin requires it" works: the lock lives on the box until unticking
     // whatever required it releases it on the next resolve.
-    function planLocks() {
+    function planLocks(prunedIds) {
         const lockedBy = new Map(); // dependency id -> [plugins in the set that declare it]
         for (const id of catalogSelection) {
+            // A plugin the resolver dropped cannot keep locking its own
+            // dependencies: it is not in the install set, so nothing it
+            // requires is being pulled in on its account.
+            if (prunedIds.has(id)) continue;
             const handle = catalogBoxById.get(id);
             const deps = handle && Array.isArray(handle.entry.dependencies) ? handle.entry.dependencies : [];
             for (const dep of deps) {
@@ -482,32 +486,53 @@
     }
 
     function mirrorPlanOntoRows(plan) {
-        const lockedBy = planLocks();
         const pruned = ((plan && plan.conflicts) || []).filter(c => c && c.dropped);
+        const prunedIds = new Set(pruned.map((c) => c.dropped));
+        // Dropped entries leave the set before any lock is computed, so a
+        // conflict-pruned plugin never adopts or locks anything behind it.
+        for (const id of prunedIds) catalogSelection.delete(id);
+
+        // Adopt required dependencies to a fixed point: a dependency pulled in
+        // by this pass can declare dependencies of its own, which only a
+        // recompute sees. Without the loop the note could name an install-set
+        // entry whose box stays unchecked until the next resolve.
+        let lockedBy = planLocks(prunedIds);
+        for (let grew = true; grew;) {
+            grew = false;
+            for (const handleEntry of catalogBoxById) {
+                const id = handleEntry[0];
+                const handle = handleEntry[1];
+                // An entry already on disk (bundled, or held) is not adopted as
+                // a selection: its checkbox is static and the row already says
+                // what is on it.
+                if (prunedIds.has(id) || handle.staticDisabled) continue;
+                if (lockedBy.has(id) && !catalogSelection.has(id)) {
+                    catalogSelection.add(id);
+                    grew = true;
+                }
+            }
+            if (grew) lockedBy = planLocks(prunedIds);
+        }
 
         for (const handleEntry of catalogBoxById) {
             const id = handleEntry[0];
             const handle = handleEntry[1];
-            if (lockedBy.has(id)) {
-                const by = lockedBy.get(id);
-                handle.box.disabled = true;
-                // An entry already on disk (bundled, or held) is not adopted as
-                // a selection: its checkbox is static and the row already says
-                // what is on it.
-                if (!handle.staticDisabled && !catalogSelection.has(id)) {
-                    handle.box.checked = true;
-                    catalogSelection.add(id);
-                }
-            } else if (pruned.some((c) => c.dropped === id)) {
+            if (prunedIds.has(id)) {
+                // Pruned beats locked: a box the plan drops must never read as
+                // to-be-installed, whatever declared it as a dependency.
                 handle.box.disabled = handle.staticDisabled;
                 handle.box.checked = false;
-                catalogSelection.delete(id);
+            } else if (lockedBy.has(id)) {
+                handle.box.disabled = true;
+                if (!handle.staticDisabled) handle.box.checked = true;
             } else {
                 handle.box.disabled = handle.staticDisabled;
                 handle.box.checked = catalogSelection.has(id);
             }
         }
-        const locked = [...lockedBy].map(([id, by]) => ({ id, by }));
+        const locked = [...lockedBy]
+            .filter(([id]) => !prunedIds.has(id))
+            .map(([id, by]) => ({ id, by }));
         return { locked, pruned };
     }
 
@@ -569,9 +594,12 @@
             catalogDependencyInfo.textContent = '';
         } catch (e) {
             // A resolver that cannot answer must not pretend the plan is fine:
-            // the user is told to retry rather than being left with a stale note.
+            // hide the stale note and say the selection could not be resolved,
+            // rather than leaving the install button looking ready over an
+            // unknown set.
             catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
+            showCatalogMessage('Could not resolve the selection. Try again before installing.', false);
         }
     }
 
