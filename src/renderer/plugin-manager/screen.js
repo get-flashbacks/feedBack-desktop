@@ -205,9 +205,17 @@
     async function refreshCatalog() {
         if (!catalogBox) return;
         try {
-            const catalog = await plugins.catalog();
-            if (!Array.isArray(catalog) || catalog.length === 0) {
-                catalogBox.innerHTML = '<div class="text-sm text-slate-500 italic">No catalog plugins are available in this build.</div>';
+            // The bridge answers { ok, entries } — the same shape the browse
+            // list above reads. A bare array is what older callers hand back,
+            // so both are accepted rather than one of the two lists lying.
+            const result = await plugins.catalog();
+            const catalog = Array.isArray(result) ? result : (result && Array.isArray(result.entries) ? result.entries : []);
+            if (!catalog.length) {
+                // A catalog that could not be read says so; "no plugins in this
+                // build" would be a different, and wrong, thing to say.
+                catalogBox.innerHTML = result && result.ok === false && result.message
+                    ? `<div class="text-sm text-red-400">${esc(result.message)}</div>`
+                    : '<div class="text-sm text-slate-500 italic">No catalog plugins are available in this build.</div>';
                 return;
             }
             catalogBox.innerHTML = '';
@@ -236,7 +244,6 @@
                 box.disabled = !installable || entry.bundled || selection.tier === 'essential' || held;
                 if (box.disabled) catalogSelection.delete(entry.id);
                 box.checked = catalogSelection.has(entry.id);
-                if (typeof updateDependencyInfo === 'function') updateDependencyInfo();
                 box.addEventListener('change', async () => {
                     if (box.checked) catalogSelection.add(entry.id);
                     else catalogSelection.delete(entry.id);
@@ -286,6 +293,11 @@
                 catalogBox.appendChild(row);
             }
             updateInstallLabel();
+            // One resolve for the whole list, once the rows have settled the
+            // selection between them: built row by row, the same call would
+            // fire per checkbox against a half-built selection, and every
+            // answer after the first would be a race.
+            await updateDependencyInfo();
             await updateCheckBadge();
         } catch (e) {
             catalogBox.innerHTML = `<div class="text-sm text-red-400">Error loading the plugin catalog: ${esc(e?.message || e)}</div>`;
@@ -426,8 +438,21 @@
                     for (const d of req[id]) if (!catalogSelection.has(d) && added.indexOf(d) === -1) added.push(d);
                 }
             }
+            // What the resolver prunes, said before anything is downloaded. A
+            // keeper named is a clash; no keeper is the cascade that followed
+            // some other drop.
+            const dropped = ((plan && plan.conflicts) || []).filter(c => c && c.dropped);
+            const notes = [];
             if (added.length) {
-                catalogDependencyInfo.textContent = 'Automatically selected required dependencies: ' + added.join(', ') + '.';
+                notes.push('Automatically selected required dependencies: ' + added.join(', ') + '.');
+            }
+            if (dropped.length) {
+                notes.push('Will not install: ' + dropped.map(c => c.kept
+                    ? `${c.dropped} conflicts with ${c.kept}`
+                    : `${c.dropped} depends on something that was dropped`).join('; ') + '.');
+            }
+            if (notes.length) {
+                catalogDependencyInfo.textContent = notes.join(' ');
                 catalogDependencyInfo.classList.remove('hidden');
                 return;
             }

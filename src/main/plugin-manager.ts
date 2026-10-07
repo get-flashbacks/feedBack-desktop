@@ -58,6 +58,7 @@ import {
 } from './ipc-channels';
 import {
     SelectionEntry,
+    SelectionPlan,
     resolveSelection,
     selectableEntries,
     toSelectionEntries,
@@ -674,6 +675,8 @@ export interface CatalogInstallPlan {
     ids: string[];
     /** The part of it the batch will actually download. */
     outstanding: string[];
+    /** What the conflict pass pruned on the way: kept/dropped pairs, plus the cascade. */
+    conflicts: SelectionPlan['conflicts'];
 }
 
 /**
@@ -694,7 +697,18 @@ export function planCatalogInstall(rawIds: unknown): CatalogInstallPlan {
     const plan = resolveSelection(entries, requested);
     const locked = selectableEntries(entries).filter(e => e.tier === 'essential').map(e => e.id);
     const resolved = resolveSelection(entries, [...locked, ...plan.ids]);
-    return { ids: resolved.ids, outstanding: outstandingIds(entries, resolved.ids) };
+    return {
+        ids: resolved.ids,
+        outstanding: outstandingIds(entries, resolved.ids),
+        // The second pass only sees what the first one kept, so a request the
+        // first pass pruned never reaches it and its conflicts go unreported.
+        // Keep those drops as well — minus anything the locked entries carried
+        // back in, which the second pass has already answered for.
+        conflicts: [
+            ...plan.conflicts.filter(c => !resolved.ids.includes(c.dropped)),
+            ...resolved.conflicts,
+        ],
+    };
 }
 
 async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; message: string }> {
@@ -1133,7 +1147,7 @@ export function initPluginManager(getWindow: () => BrowserWindow | null = () => 
             }
         };
         for (const id of plan.ids) visit(id);
-        return { ids: plan.ids, outstanding: plan.outstanding, required, conflicts: [] };
+        return { ids: plan.ids, outstanding: plan.outstanding, required, conflicts: plan.conflicts };
     });
 
     ipcMain.handle('plugins:installCatalog', async (_event, ids: unknown) => {
