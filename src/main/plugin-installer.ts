@@ -53,6 +53,16 @@ export class InstallError extends Error {
 /** The catalog trust classes, and the GitHub owner each one requires. */
 export type CatalogSource = 'get-flashbacks' | 'upstream-official' | 'reviewed-community';
 
+/** Lifecycle status the catalog may attach to an entry. Absent, an entry is
+ *  `active`. Carried by the release-locked catalog so the desktop can stop
+ *  offering a plugin before it is removed (5/6). */
+export type CatalogEntryStatus = 'active' | 'deprecated' | 'withdrawn' | 'security-blocked';
+/** Allowed values for `CatalogEntry.status`. Exported so the lifecycle rule and
+ *  the runtime validator answer the same question from one list. */
+export const CATALOG_STATUSES: ReadonlySet<string> = new Set([
+    'active', 'deprecated', 'withdrawn', 'security-blocked',
+]);
+
 export interface CatalogEntry {
     id: string;
     installDir: string;
@@ -62,6 +72,8 @@ export interface CatalogEntry {
     commit: string;
     archiveSha256: string;
     source: CatalogSource;
+    /** Catalog lifecycle status; absent defaults to `active`. */
+    status?: CatalogEntryStatus;
     dependencies: string[];
     conflicts: string[];
     size: { downloadBytes: number; installedBytes: number };
@@ -199,6 +211,7 @@ export function validateCatalogEntry(entry: unknown): entry is CatalogEntry {
     if (!parts) return false;
     const requiredOwner = SOURCE_OWNERS[e.source];
     if (requiredOwner && parts.owner.toLowerCase() !== requiredOwner) return false;
+    if (e.status !== undefined && !(typeof e.status === 'string' && CATALOG_STATUSES.has(e.status))) return false;
     return true;
 }
 

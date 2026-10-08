@@ -51,6 +51,9 @@ jobs:
       - name: Run plugin compatibility tests
         run: node --test tests/plugin-compat.test.js
 
+      - name: Run plugin preflight tests
+        run: node --test tests/plugin-preflight.test.js
+
       - name: Run plugin installer tests
         run: node --test tests/plugin-installer.test.js
 
@@ -83,3 +86,55 @@ jobs:
       - name: npm audit
         run: npm audit --audit-level=high
         continue-on-error: true
+
+  # Lifecycle 6/6 (issue #25): the plugin lifecycle and rollback rules are pure
+  # (plugin-compat / plugin-lifecycle / plugin-installer / plugin-installed-state /
+  # plugin-preflight / plugin-precedence / plugin-selection / plugin-setup-state),
+  # so they run on every supported desktop platform — not just the Linux check
+  # above. This pins the OS-specific behaviour the rules depend on (path
+  # separators, case-insensitive vs case-sensitive install dirs, and atomic
+  # temp-file/rename writes that must survive a crash on every platform,
+  # including replacing files that are in use on Windows) so a platform drift is
+  # a red cross, not a silent skip.
+  lifecycle-platform-check:
+    name: Lifecycle & rollback tests (${{ matrix.os }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+          - os: macos-14
+            platform: macos
+          - os: windows-2022
+            platform: windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read build configuration
+        id: config
+        shell: bash
+        run: |
+          NODE_VERSION=$(node -p "require('./.build-config.json').versions.node")
+          echo "node=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.config.outputs.node }}
+
+      # No package-lock.json in this repo — npm ci is not available.
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: TypeScript type check
+        run: npm run typecheck
+
+      # Only the pure plugin suites: no JUCE submodule, no native build, no
+      # Electron runtime — so they run identically on win/mac/linux. The native
+      # suites are covered by build.yml's platform matrix.
+      - name: Run plugin lifecycle & rollback test suites
+        run: node --test tests/plugin-catalog.test.js tests/plugin-compat.test.js tests/plugin-preflight.test.js tests/plugin-lifecycle.test.js tests/plugin-precedence.test.js tests/plugin-selection.test.js tests/plugin-setup-state.test.js tests/plugin-installed-state.test.js tests/plugin-installer.test.js tests/plugin-catalog-view.test.js tests/config-paths.test.js

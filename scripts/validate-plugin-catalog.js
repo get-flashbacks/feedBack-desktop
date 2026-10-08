@@ -30,6 +30,7 @@ const ARCHIVE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const VERSION_PATTERN = /^(?:[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+)$/;
 const SOURCES = new Set(['get-flashbacks', 'upstream-official', 'reviewed-community']);
 const STABILITIES = new Set(['stable', 'beta', 'experimental']);
+const STATUSES = new Set(['active', 'deprecated', 'withdrawn', 'security-blocked']);
 const TIERS = new Set(['essential', 'recommended', 'optional', 'hidden']);
 const TOP_LEVEL_KEYS = new Set(Object.keys(schema.properties));
 const ENTRY_KEYS = new Set(Object.keys(entrySchema.properties));
@@ -119,6 +120,10 @@ function validateCatalog(catalog) {
     if (!TIERS.has(entry.selection.tier)) fail(`${label}.selection.tier is invalid`);
     if (typeof entry.selection.defaultSelected !== 'boolean') fail(`${label}.selection.defaultSelected must be boolean`);
     if (entry.selection.defaultSelected && entry.selection.tier === 'hidden') fail(`${label}.selection cannot default-select a hidden plugin`);
+  }
+  if (entry.status !== undefined && !STATUSES.has(entry.status)) fail(`${label}.status is invalid`);
+  if (entry.status === 'withdrawn' && entry.selection && (entry.selection.tier === 'essential' || entry.selection.tier === 'recommended')) {
+    fail(`${label}.selection cannot default-select or recommend a withdrawn plugin`);
   }
   if (ids.has(entry.id)) fail(`${label}.id duplicates ${entry.id}`); ids.add(entry.id);
     if (dirs.has(entry.installDir)) fail(`${label}.installDir duplicates ${entry.installDir}`); dirs.add(entry.installDir);

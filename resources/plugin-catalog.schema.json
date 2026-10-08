@@ -182,6 +182,16 @@
               "type": "boolean"
             }
           }
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "deprecated",
+            "withdrawn",
+            "security-blocked"
+          ],
+          "default": "active"
         }
       }
     }

@@ -47,7 +47,16 @@ import {
     rollbackInstall,
 } from './plugin-installer';
 import { activeSourceFor, scanPluginCopies, type PluginCopy } from './plugin-precedence';
-import { PLUGIN_API_VERSION, compatibilityFor } from './plugin-compat';
+import { PLUGIN_API_VERSION, compatibilityFor, type BuildVersions } from './plugin-compat';
+import {
+    blockedReason,
+    canReenablePlugin,
+    entryStatus,
+    isEntryBlocked,
+    isTrustedCatalogSource,
+    preflightForUpdate,
+    type PreflightReport,
+} from './plugin-preflight';
 import {
     IPC_PLUGIN_CATALOG_CANCEL,
     IPC_PLUGIN_CATALOG_PROGRESS,
@@ -694,6 +703,14 @@ export function listCatalog(): { ok: boolean; entries: unknown[]; message?: stri
                 ...entry,
                 ...view,
                 compat: compatibilityFor(entry, build),
+                // Catalog lifecycle status is independent of build: a withdrawn or
+                // security-blocked entry is blocked on every build that ships it,
+                // so the row can show the reason and refuse re-enable without a
+                // target version in hand.
+                status: entryStatus(entry),
+                blocked: isEntryBlocked(entry),
+                blockedReason: blockedReason(entry),
+                trustedSource: isTrustedCatalogSource(entry),
                 // The override's manifest version is what is on disk; the
                 // record's is what the lifecycle acts on. They agree once every
                 // install is recorded, and when they do not, the copy on disk is
@@ -720,6 +737,31 @@ export function checkCatalogUpdates(): { ids: string[]; count: number } {
         console.error('[plugins] catalog unavailable', e);
     }
     return { ids, count: ids.length };
+}
+
+/**
+ * The preflight the desktop-update path asks before applying a release: whether
+ * each installed optional plugin is expected to run on the target build, so
+ * incompatible or blocked plugins can be disabled (or held) before the new
+ * desktop swaps in. Mirrors listCatalog()'s catalog/installed-state reads so the
+ * verdicts are built from the same state the screen shows.
+ *
+ * `target` is the core version + plugin API the release ships; the desktop ships
+ * its own core, so the release's version is the target core version and
+ * PLUGIN_API_VERSION is the target plugin API unless the release notes declare
+ * an API bump (feedBack#102), which is what feeds `target.pluginApiVersion`.
+ *
+ * A missing or damaged catalog yields an empty report — "nothing to check", not
+ * a denial of the update.
+ */
+export function preflightForDesktopUpdate(target: BuildVersions): PreflightReport {
+    try {
+        const catalog = getCatalog();
+        return preflightForUpdate(catalog.entries, recordedState(), target);
+    } catch (e) {
+        console.error('[plugins] catalog unavailable', e);
+        return { verdicts: [], needsAttention: false };
+    }
 }
 
 /**
@@ -1112,6 +1154,28 @@ export async function setCatalogPluginEnabled(id: unknown, enabled: unknown): Pr
     }
     const pluginsDir = getPluginsDir();
     if (catalogBusy) return { success: false, message: 'A plugin installation is already running.' };
+    // Enabling is gated by the catalog's lifecycle status: a hard-blocked entry
+    // cannot be re-enabled on a build that carries the block. The override path
+    // is explicit — the user must move to a build that no longer carries it (i.e.
+    // defer this desktop update, or apply one where the entry is no longer
+    // security-blocked / withdrawn). Disabling is always allowed; only
+    // re-enabling is refused, so the record stays consistent with what is on disk.
+    if (enabled) {
+        let catalogEntry: CatalogEntry | undefined;
+        try {
+            catalogEntry = getCatalog().byId.get(pluginId);
+        } catch {
+            // No catalog: there is no status to refuse on, so re-enabling the
+            // on-disk copy is allowed.
+        }
+        if (catalogEntry && !canReenablePlugin(catalogEntry)) {
+            const reason = blockedReason(catalogEntry) ?? `${name} cannot be enabled here.`;
+            return {
+                success: false,
+                message: `${reason} To re-enable it, apply a desktop update that no longer blocks ${name}, or stay on your current release.`,
+            };
+        }
+    }
     catalogBusy = true;
     const parked = isPluginDisabled(pluginsDir, record.installDir);
     if (record.enabled === enabled && enabled === !parked) {

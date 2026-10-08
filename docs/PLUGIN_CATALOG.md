@@ -58,7 +58,13 @@ renderer reaches it through `window.feedBackDesktop.plugins`:
   baseline), `activeSource` (which copy the backend loads — `bundled`,
   `writable-override`, `installed`, or `none`), `canRollback`, `recoveryInstructions`
   (a human-readable recovery note the row renders when a rollback or downgrade
-  path is available — see lifecycle 4/6 below), `compat`
+  path is available — see lifecycle 4/6 below), `status`
+  (`active` / `deprecated` / `withdrawn` / `security-blocked`; see lifecycle 5/6
+  below), `blocked` and `blockedReason` (set when `status` is `withdrawn` or
+  `security-blocked`, so the row can show why and the enable control can refuse
+  re-enabling it), `trustedSource` (whether the archive would be downloaded from
+  the owner the entry's `source` trust class claims — `get-flashbacks` sources
+  only resolve to a `get-flashbacks` fork, never an arbitrary upstream), `compat`
   (the entry's declared `compatibility` bounds judged against this build by
   `src/main/plugin-compat.ts`: `{ ok, requirements, reason }`, where
   `requirements` is the display phrase for the bounds ("fee[dB]ack core 0.3.0
@@ -356,6 +362,87 @@ for a disabled or uninstalled copy — neither has a live activation to recover.
   left claiming a version that is not on disk. A record-write failure is
   logged and reported, but never turns the already-successful restore into a
   failure or skips the backend restart.
+
+## Lifecycle status and preflight (5/6)
+
+A catalog entry may carry an optional `status`: `active` (the default when
+absent), `deprecated` (still ships and runs, but users are warned it is on its
+way out), `withdrawn` (removed by the maintainer — the plugin is dropped from the
+catalog and disabled on disk), or `security-blocked` (a known-insecure release
+that the desktop refuses to run on this build). The schema and the runtime
+validator both reject an unknown `status`, so a damaged entry fails closed to
+`active` rather than inventing a verdict.
+
+`src/main/plugin-preflight.ts` (issue #24) applies the same question twice:
+- against the *current* build, for the catalog row: `isEntryBlocked` /
+  `blockedReason` surface why a row is disabled and why its enable control is
+  refused; `canReenablePlugin` is the single rule the enable-gate in
+  `plugin-manager.ts` consults, so the row and the operation agree.
+- against the *target* build, before a desktop update is applied:
+  `preflightForUpdate(catalogEntries, records, target)` judges every installed
+  optional plugin's catalog entry against the release's core + plugin-API, and
+  reports a per-plugin action of `keep` or `disable` plus an explanation. The
+  update path asks the same function the screen would, so "this cannot run on the
+  next build" and "the screen must tell the user that" cannot drift apart.
+
+Behaviour the preflight enforces and the screen shows:
+- **Incompatible plugins are disabled, not replaced.** A plugin whose declared
+  `minCoreVersion` / `minPluginApiVersion` the target cannot meet is disabled
+  before the update swaps in, with the compatibility reason shown — never
+  silently reinstalled from an arbitrary upstream.
+- **A deprecated plugin stays enabled and warns.** It runs on the target (it is
+  compatible) but the row carries the advisory so the user can migrate off it.
+- **Security-blocked and withdrawn entries are disabled and cannot be re-enabled
+  on the build that carries the block.** Re-enabling them requires an explicit
+  override path: the user must move to a build where the entry is no longer
+  `security-blocked` / `withdrawn` (i.e. defer this desktop update, or apply a
+  release where the entry is restored / unblocked). `setCatalogPluginEnabled`
+  refuses to enable a hard-blocked entry and names that override in its message.
+- **A missing or damaged catalog does not deny an update.** A lost catalog yields
+  an empty preflight report ("nothing to check"), so a corrupted bundled file
+  cannot block a security release.
+
+The preflight is wired to the update path as a computed-and-shown result; the
+hard gate that a hard-blocked plugin must be disabled before the swap is the
+responsibility of `update-manager.ts`'s apply step, which consumes
+`preflightForUpdate`'s report.
+
+## Platform verification (6/6)
+
+The plugin lifecycle and rollback rules are pure — no Electron, no filesystem,
+no network — so CI runs them on every supported desktop platform, not just the
+Linux typecheck job. `.github/workflows/ci.yml`'s `lifecycle-platform-check`
+job runs the full plugin test family (`plugin-catalog`, `plugin-compat`,
+`plugin-preflight`, `plugin-lifecycle`, `plugin-precedence`, `plugin-selection`,
+`plugin-setup-state`, `plugin-installed-state`, `plugin-installer`,
+`plugin-catalog-view`, `config-paths`) across Ubuntu, macOS and Windows.
+
+What the matrix pins down and what the docs call out as genuinely different per
+OS:
+- **Path handling.** Install dirs are validated against `INSTALL_DIR_PATTERN`
+  (Python-safe) and resolved through `resolveSafePluginDir`, so a traversal or an
+  absolute name cannot escape the plugins root on any platform.
+- **Atomic writes.** The installed-state record is written to a `.tmp` sibling,
+  flushed, then renamed over the real file (`plugin-installed-state.ts`), so a
+  crash mid-write leaves either the old or the new record, never a half-written
+  one — on every filesystem the three platforms build on.
+- **File replacement in use.** The installer's transaction retries transient
+  Windows `EPERM`/`EBUSY` and the backend is restarted before every swap
+  (`restartPythonAndWait`), so a file the backend holds can be replaced; a
+  cross-device `EXDEV` is permanent and surfaced rather than retried forever.
+
+## Source trust
+
+Every catalog entry carries a `source` trust class — `get-flashbacks`,
+`upstream-official`, or `reviewed-community` — and the URL the installer builds
+from it (`https://codeload.github.com/OWNER/REPO/zip/COMMIT`) is anchored to that
+class: a `get-flashbacks` entry resolves to a `get-flashbacks` fork and nothing
+else (there is no upstream fork of a fork to fall back to), and an
+`upstream-official` entry resolves to `got-feedback`, the upstream project's own
+organization. The verifier in `plugin-preflight.ts` (`isTrustedCatalogSource`)
+re-checks exactly that before any install; the shipped catalog installs every
+entry from a `get-flashbacks` fork, so no installation file is ever sourced from
+an unverified third-party owner.
 
 ## First-run guided selection
 
