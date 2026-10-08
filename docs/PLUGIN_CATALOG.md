@@ -341,15 +341,21 @@ for a disabled or uninstalled copy — neither has a live activation to recover.
   having to ask twice. A restart that cannot happen is reported in the message.
 - **Recovery instructions are derived, not stored.** They are computed in
   `lifecycleView` (see `src/main/plugin-lifecycle.ts`) from `canRollback` and
-  `downgradeVersions`, so the advice the screen gives always matches the button
-  the screen actually offers.
-- **The record is rewritten to the restored version.** `rollbackCatalogPlugin`
-  calls `recordAfterRollback` after `rollbackInstall` returns `'restored'`, so the
-  installed-state record describes the copy that is now on disk — the version
-  that was rolled back from becomes the newest entry in `previousVersions`,
-  and the pin is cleared. When the restored version's identity cannot be
-  recovered from the record (no history pin), the record is dropped rather than
-  left claiming a version that is no longer on disk.
+  the genuinely earlier pins in `downgradeVersions`, so the advice the screen
+  gives always matches the button the screen actually offers. The downgrade
+  note stays silent when the history holds only newer versions — restored
+  copies never keep the just-failed version, so it is never presented as the
+  way back.
+- **The record is rewritten to the copy actually on disk.**
+  `rollbackCatalogPlugin` reads the restored version from the restored manifest
+  (`installedVersionOnDisk`) and calls `recordAfterRollback`, so the
+  installed-state record describes the copy that is now on disk even when a
+  second install over an unconfirmed copy kept the OLD backup: the history pin
+  matching the restored version becomes the record, and only older pins are
+  kept. When nothing in the history matches, the record is dropped rather than
+  left claiming a version that is not on disk. A record-write failure is
+  logged and reported, but never turns the already-successful restore into a
+  failure or skips the backend restart.
 
 ## First-run guided selection
 

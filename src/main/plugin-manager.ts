@@ -39,6 +39,7 @@ import {
     hasBackup,
     installCatalogBatch,
     installCatalogEntry,
+    installedVersionOnDisk,
     isPluginDisabled,
     loadCatalog,
     removePluginSource,
@@ -816,30 +817,43 @@ async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; m
     catalogBusy = true;
     try {
         const result = await rollbackInstall(getPluginsDir(), entry.installDir);
-        // The record must describe the copy that is now on disk. A restore pulls
-        // the version from the pin that nextRecordAfterInstall left when the
-        // install that created the backup was recorded without a confirmed
-        // activation; if that pin is gone the restored identity is unknown and
-        // the record is dropped rather than left claiming a version not on disk.
-        // A 'removed' result means nothing was restored, so any record is stale.
-        const record = recordedFor(entry.id);
-        if (record) {
-            const now = new Date().toISOString();
-            if (result === 'restored') {
-                const restored = recordAfterRollback(record, now);
-                if (restored) {
-                    await updateInstalledState(installedStateDir(), (records) => {
-                        records.set(entry.id, restored);
-                    }, now);
-                } else {
-                    await updateInstalledState(installedStateDir(), (records) => {
-                        records.delete(entry.id);
-                    }, now);
+        // The record must describe the copy that is now on disk. The restored
+        // version is read from the restored manifest: a second install over an
+        // unconfirmed copy keeps the OLD backup, so `previousVersions[0]`
+        // alone can name a version the restore discarded. When no history pin
+        // matches, or nothing was restored, the record is dropped rather than
+        // left claiming a version that is not on disk.
+        if (result === 'restored') {
+            const onDiskVersion = installedVersionOnDisk(getPluginsDir(), entry.installDir);
+            const record = recordedFor(entry.id);
+            if (onDiskVersion !== null && record) {
+                const restored = recordAfterRollback(record, onDiskVersion, new Date().toISOString());
+                try {
+                    if (restored) {
+                        const next = restored;
+                        await updateInstalledState(installedStateDir(), (records) => {
+                            records.set(entry.id, next);
+                        }, next.installedAt);
+                    } else {
+                        await updateInstalledState(installedStateDir(), (records) => {
+                            records.delete(entry.id);
+                        }, new Date().toISOString());
+                    }
+                } catch (e) {
+                    // The files are already back; a state write that will not
+                    // land must not turn the successful restore into a failure
+                    // or skip the backend restart. Report it the same way the
+                    // other record writes do and keep going.
+                    console.error('[plugins] could not record the rollback', e);
                 }
-            } else {
+            }
+        } else {
+            try {
                 await updateInstalledState(installedStateDir(), (records) => {
                     records.delete(entry.id);
-                }, now);
+                }, new Date().toISOString());
+            } catch (e) {
+                console.error('[plugins] could not record the rollback', e);
             }
         }
         // The restored version is back on disk, but the backend is still running
@@ -933,9 +947,11 @@ async function installOverInstalled(
             };
         }
         let restored = 'It was removed.';
+        let wasRestored = false;
         try {
             if (await rollbackInstall(pluginsDir, entry.installDir) === 'restored') {
                 restored = 'The previous version was restored.';
+                wasRestored = true;
             }
         } catch (e) {
             restored = e instanceof InstallError ? e.message : 'The previous version could not be restored.';
@@ -947,7 +963,7 @@ async function installOverInstalled(
             await restartPythonAndWait();
         } catch (e) {
             console.error('[plugins] restart after auto-rollback failed', e);
-            if (restored === 'The previous version was restored.') {
+            if (wasRestored) {
                 restored += ' Restart the app to activate the restored version.';
             }
         }

@@ -544,6 +544,21 @@ export function hasBackup(pluginsDir: string, installDir: string): boolean {
     return fs.existsSync(backupPathFor(pluginsDir, installDir));
 }
 
+/**
+ * Version the copy on disk claims in its own manifest, or null when no
+ * readable manifest vouches for it. Used after a rollback to identify the
+ * restored copy: a second install over an unconfirmed copy keeps the OLD
+ * backup and discards the intermediate copy, so the record's history alone
+ * cannot say what just landed on disk.
+ */
+export function installedVersionOnDisk(pluginsDir: string, installDir: string): string | null {
+    const root = path.resolve(pluginsDir);
+    const dir = resolveSafePluginDir(root, installDir);
+    if (!dir || !INSTALL_DIR_PATTERN.test(installDir)) return null;
+    const version = readInstalledManifest(dir)?.version;
+    return typeof version === 'string' && isPluginVersion(version) ? version : null;
+}
+
 // ── Disabling, re-enabling and removing a copy ──────────────────────────────
 
 /**

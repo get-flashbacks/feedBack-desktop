@@ -445,6 +445,27 @@ test('a second unconfirmed update keeps the last known-good backup', async () =>
     assert.strictEqual(JSON.parse(fs.readFileSync(path.join(pluginsDir, 'example', 'plugin.json'))).version, '0.8.0');
 });
 
+test('installedVersionOnDisk reports the live manifest, or null for anything unusable', async () => {
+    const { pluginsDir, entry, fetch } = setup(pluginZip());
+    fs.mkdirSync(path.join(pluginsDir, 'example'));
+    fs.writeFileSync(path.join(pluginsDir, 'example', 'plugin.json'), JSON.stringify({ id: 'example', name: 'Example', version: '0.8.0' }));
+    assert.strictEqual(installer.installedVersionOnDisk(pluginsDir, 'example'), '0.8.0');
+
+    // A second unconfirmed install keeps the old backup and discards the
+    // intermediate copy; the live manifest is the only thing that says what
+    // would run, or what a restore would put back.
+    await installer.installCatalogEntry(entry, { pluginsDir, fetch });
+    assert.strictEqual(installer.installedVersionOnDisk(pluginsDir, 'example'), '1.0.0');
+
+    assert.strictEqual(installer.installedVersionOnDisk(pluginsDir, 'missing'), null);
+    assert.strictEqual(installer.installedVersionOnDisk(pluginsDir, '..'), null);
+    assert.strictEqual(installer.installedVersionOnDisk(pluginsDir, ''), null);
+    fs.writeFileSync(path.join(pluginsDir, 'example', 'plugin.json'), 'not json');
+    assert.strictEqual(installer.installedVersionOnDisk(pluginsDir, 'example'), null);
+    fs.writeFileSync(path.join(pluginsDir, 'example', 'plugin.json'), JSON.stringify({ id: 'example', version: 'v9' }));
+    assert.strictEqual(installer.installedVersionOnDisk(pluginsDir, 'example'), null);
+});
+
 test('rollback of a fresh install removes it; commit drops the backup', async () => {
     const { pluginsDir, entry, fetch } = setup(pluginZip());
     await installer.installCatalogEntry(entry, { pluginsDir, fetch });

@@ -267,31 +267,34 @@ export function nextRecordAfterInstall(
 }
 
 /**
- * The record after a manual rollback restored the backup: the version that was
- * on disk becomes the recorded version, pulled from the pin that
- * `nextRecordAfterInstall` left at `previousVersions[0]` when the install that
- * created the backup was recorded without a confirmed activation. The displaced
- * version drops onto the front of the history, and the pin is cleared — it was
- * a statement about the version that was installed, not the one restored.
+ * The record after a manual rollback restored the backup: the record is rebuilt
+ * from the history pin whose version matches the copy actually on disk. That
+ * match cannot be `previousVersions[0]` alone — a second install over an
+ * unconfirmed copy keeps the OLD backup and discards the intermediate copy, so
+ * the first history entry names a version that is nowhere on disk. The caller
+ * reads the restored version from the restored manifest (see
+ * `installedVersionOnDisk`) and passes it as `onDiskVersion`.
  *
- * Returns null when the restored version cannot be recovered from the record
- * (history is empty), so the caller can drop the record rather than let it
- * claim a version that is no longer on disk.
+ * Only pins older than the restored version are kept: the version that was
+ * rolled back from is never re-offered as a downgrade, because its activation
+ * was never confirmed. The pin is cleared — it was a statement about the
+ * version that was installed, not the one restored — and `enabled` carries over.
+ *
+ * Returns the record unchanged when the disk already agrees with it, and null
+ * when no history pin matches the restored version, so the caller can drop the
+ * record rather than let it claim a version that is not on disk.
  */
 export function recordAfterRollback(
     record: InstalledPluginRecord,
+    onDiskVersion: string,
     now: string,
 ): InstalledPluginRecord | null {
-    const restored = record.previousVersions?.[0];
+    if (onDiskVersion === record.version) return record;
+    const restored = record.previousVersions?.find(pin => pin.version === onDiskVersion);
     if (!restored) return null;
-    // The version that was on disk is now history. pinFor returns null for a
-    // copy recorded before schema v2 (no archive sizes), in which case it simply
-    // drops out of the history rather than being pinned.
-    const displaced = pinFor(record);
-    const history = (displaced
-        ? [displaced, ...(record.previousVersions ?? []).slice(1)]
-        : (record.previousVersions ?? []).slice(1)
-    ).slice(0, MAX_HISTORY);
+    const history = (record.previousVersions ?? [])
+        .filter(pin => pin.version !== restored.version && compareVersions(pin.version, restored.version) < 0)
+        .slice(0, MAX_HISTORY);
     return {
         id: record.id,
         installDir: record.installDir,
@@ -407,11 +410,15 @@ export function lifecycleView(options: {
     // uninstalled one has nothing on disk. A backup is the recovery path of
     // first resort; a committed-away backup leaves the recorded history as the
     // only way back, spoken of as the "Downgrade" buttons the view already lists.
+    // The downgrade note fires only when the history holds a genuinely earlier
+    // candidate: the history can also hold newer pins the user moved away from,
+    // and the advice must not call those "earlier" or present a version whose
+    // activation was never confirmed as the way back.
     let recoveryInstructions = '';
     if (installed && !disabled) {
         if (canRollback) {
             recoveryInstructions = `Use "Restore previous" to roll back ${entry.name} to the version installed before this one if this version does not work.`;
-        } else if (downgradeCandidates(record).length > 0) {
+        } else if (downgradeCandidates(record).some(pin => compareVersions(pin.version, record?.version) < 0)) {
             recoveryInstructions = `Use "Downgrade" to return ${entry.name} to an earlier verified version if this version does not work.`;
         }
     }
