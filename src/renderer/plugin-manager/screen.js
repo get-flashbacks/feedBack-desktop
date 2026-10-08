@@ -652,10 +652,9 @@
             catalogDependencyInfo.textContent = '';
         } catch (e) {
             // A resolver that cannot answer must not pretend the plan is fine:
-            // hide the stale note and say the selection could not be resolved,
+            // clear the stale note and say the selection could not be resolved,
             // rather than leaving the install button looking ready over an
             // unknown set.
-            catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
             showCatalogMessage('Could not resolve the selection. Try again before installing.', false);
         }
@@ -712,7 +711,6 @@
                 }
 
                 if (result.success && catalogDependencyInfo) {
-                    catalogDependencyInfo.classList.add('hidden');
                     catalogDependencyInfo.textContent = '';
                 }
                 await refreshCatalog();
@@ -723,6 +721,7 @@
                 unsubscribe();
                 catalogState.clear();
                 catalogProgressWrap.classList.add('hidden');
+                if (catalogProgressText) catalogProgressText.textContent = '';
                 setCatalogBusy(false);
                 // setCatalogBusy(false) resets the label to the plain form; a
                 // kept selection (a failed install) must put its count back.
