@@ -331,6 +331,16 @@ export interface LifecycleView {
     downgradeVersions: string[];
     disabled: boolean;
     canRollback: boolean;
+    /**
+     * A plain-English recovery instruction for this copy, or "" when nothing
+     * applies. Computed from `canRollback` and `downgradeVersions` so the screen
+     * always agrees with the operations it actually offers (lifecycle 4/6): when
+     * a backup is kept the user is told to "Restore previous version", and when
+     * the backup was already committed away they are told which earlier version
+     * a "Downgrade" would reinstall. Not shown for disabled or uninstalled
+     * copies — neither has an activation to recover.
+     */
+    recoveryInstructions: string;
 }
 
 export function lifecycleView(options: {
@@ -348,6 +358,19 @@ export function lifecycleView(options: {
     // vouches for it: the directory is there, so "disabled" is the truth the
     // user can act on, where "not installed" would offer them an install.
     const effectiveStatus: UpdateStatus = installed && disabled ? 'disabled' : status;
+    // Recovery instructions are only relevant while a copy is live: a disabled
+    // copy is already parked (so there is no activation to recover), and an
+    // uninstalled one has nothing on disk. A backup is the recovery path of
+    // first resort; a committed-away backup leaves the recorded history as the
+    // only way back, spoken of as the "Downgrade" buttons the view already lists.
+    let recoveryInstructions = '';
+    if (installed && !disabled) {
+        if (canRollback) {
+            recoveryInstructions = `Use "Restore previous version" to roll back ${entry.name} to the version installed before this one if this version does not work.`;
+        } else if (downgradeCandidates(record).length > 0) {
+            recoveryInstructions = `Use "Downgrade" to return ${entry.name} to an earlier verified version if this version does not work.`;
+        }
+    }
     return {
         installed,
         installedVersion: record?.version ?? null,
@@ -358,6 +381,7 @@ export function lifecycleView(options: {
         downgradeVersions: downgradeCandidates(record).map(pin => pin.version),
         disabled,
         canRollback,
+        recoveryInstructions,
     };
 }
 

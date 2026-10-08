@@ -290,6 +290,7 @@
                         ${entry.size ? ' · ' + Math.max(1, Math.round(entry.size.downloadBytes / 1024)) + ' KB' : ''}
                     </div>
                     ${incompatible ? `<div class="text-xs text-red-300 mt-0.5">${esc(incompatibleReason)}</div>` : ''}
+                    ${entry.recoveryInstructions ? `<div class="text-xs text-amber-200/80 mt-0.5">${esc(entry.recoveryInstructions)}</div>` : ''}
                 `;
 
                 row.appendChild(box);

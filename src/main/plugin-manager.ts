@@ -815,7 +815,17 @@ async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; m
     catalogBusy = true;
     try {
         await rollbackInstall(getPluginsDir(), entry.installDir);
-        return { success: true, message: `Restored the previous version of ${entry.name}. Restart to activate.` };
+        // The restored version is back on disk, but the backend is still running
+        // the broken copy that was there before the restore — so restart it the
+        // same way the per-plugin update/downgrade paths do, and only fall back to
+        // a "restart yourself" message when that restart cannot happen.
+        try {
+            await restartPythonAndWait();
+            return { success: true, message: `Restored the previous version of ${entry.name}.` };
+        } catch (e) {
+            console.error('[plugins] restart after rollback failed', e);
+            return { success: true, message: `Restored the previous version of ${entry.name}. Restart the app to activate it.` };
+        }
     } catch (e) {
         return { success: false, message: e instanceof InstallError ? e.message : 'Rollback failed.' };
     } finally {
@@ -902,6 +912,15 @@ async function installOverInstalled(
             }
         } catch (e) {
             restored = e instanceof InstallError ? e.message : 'The previous version could not be restored.';
+        }
+        // The backend is still running the broken copy: restart so the restored
+        // version loads, mirroring the rollbackCatalog path. A restart that cannot
+        // happen is reported — the files are already back, the app just needs a nudge.
+        try {
+            await restartPythonAndWait();
+        } catch (e) {
+            console.error('[plugins] restart after auto-rollback failed', e);
+            restored += ' Restart the app to activate the restored version.';
         }
         return {
             success: false,

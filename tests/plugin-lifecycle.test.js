@@ -415,12 +415,14 @@ test('a copy parked on disk is disabled whatever the record claims', () => {
     assert.strictEqual(parked.disabled, true);
     assert.strictEqual(parked.updateStatus, 'disabled');
     assert.strictEqual(parked.updateAvailable, false, 'a disabled copy is never offered an update');
+    assert.strictEqual(parked.recoveryInstructions, '', 'a disabled copy has no activation to recover');
 
     // No record but a directory on disk: still installed, still shown as disabled.
     const unrecorded = lifecycleView({ entry, record: null, disabled: true, canRollback: false });
     assert.strictEqual(unrecorded.installed, true);
     assert.strictEqual(unrecorded.installedVersion, null);
     assert.strictEqual(unrecorded.updateStatus, 'disabled');
+    assert.strictEqual(unrecorded.recoveryInstructions, '', 'a disabled copy has no activation to recover');
 
     const available = lifecycleView({ entry, record: record({ version: '1.0.0' }), disabled: false, canRollback: true });
     assert.deepStrictEqual(
@@ -435,6 +437,8 @@ test('a copy parked on disk is disabled whatever the record claims', () => {
             downgradeVersions: 0,
             disabled: false,
             canRollback: true,
+            // A live copy with a backup gets "Restore previous version" instructions.
+            recoveryInstructions: 'Use "Restore previous version" to roll back Metronome to the version installed before this one if this version does not work.',
         },
     );
 
@@ -451,6 +455,8 @@ test('a copy parked on disk is disabled whatever the record claims', () => {
             downgradeVersions: [],
             disabled: false,
             canRollback: false,
+            // An uninstalled copy has nothing on disk to recover.
+            recoveryInstructions: '',
         },
     );
 });
@@ -464,6 +470,71 @@ test('the view carries the downgrade versions the screen may offer', () => {
     });
     assert.deepStrictEqual(view.downgradeVersions, ['0.2.0', '0.1.0']);
     assert.strictEqual(view.updateStatus, 'current');
+    // A backup is available, so the restore instruction is offered even though
+    // downgrade history exists too — the backup is the shorter way back.
+    assert.match(view.recoveryInstructions, /Restore previous version/);
+    assert.ok(!view.recoveryInstructions.includes('Downgrade'));
+});
+
+// ── Recovery instructions (issue #23, lifecycle 4/6) ──
+
+test('recovery instructions point at rollback when a backup is kept', () => {
+    const view = lifecycleView({
+        entry: catalogEntry(),
+        record: record({ version: '1.0.0' }),
+        disabled: false,
+        canRollback: true,
+    });
+    assert.match(
+        view.recoveryInstructions,
+        /Use "Restore previous version" to roll back/,
+        'a live copy with a backup is told to restore the previous version',
+    );
+});
+
+test('recovery instructions fall back to downgrade when the backup was committed away', () => {
+    const view = lifecycleView({
+        entry: catalogEntry(),
+        record: recordWithHistory('1.2.0', 2),
+        disabled: false,
+        canRollback: false,
+    });
+    assert.match(
+        view.recoveryInstructions,
+        /Use "Downgrade" to return/,
+        'no backup, but history — the Downgrade buttons are the way back',
+    );
+    assert.ok(!view.recoveryInstructions.includes('Restore previous'), 'downgrade instructions do not mention restore');
+});
+
+test('recovery instructions are empty once every recovery path is gone', () => {
+    // No backup, no history, but installed: nothing can restore an earlier version.
+    const view = lifecycleView({
+        entry: catalogEntry(),
+        record: record({ version: '1.0.0' }),
+        disabled: false,
+        canRollback: false,
+    });
+    assert.strictEqual(view.recoveryInstructions, '', 'installed with nothing to roll back to or downgrade from');
+});
+
+test('recovery instructions are not offered for disabled or uninstalled copies', () => {
+    const entry = catalogEntry();
+    const disabled = lifecycleView({
+        entry,
+        record: record({ version: '1.0.0' }),
+        disabled: true,
+        canRollback: true,
+    });
+    assert.strictEqual(disabled.recoveryInstructions, '', 'a disabled copy is already parked');
+
+    const uninstalled = lifecycleView({
+        entry,
+        record: null,
+        disabled: false,
+        canRollback: false,
+    });
+    assert.strictEqual(uninstalled.recoveryInstructions, '', 'no copy to recover');
 });
 
 // ── IPC arguments ───────────────────────────────────────────────────────────
