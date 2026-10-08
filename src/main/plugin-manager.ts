@@ -920,7 +920,9 @@ async function installOverInstalled(
             await restartPythonAndWait();
         } catch (e) {
             console.error('[plugins] restart after auto-rollback failed', e);
-            restored += ' Restart the app to activate the restored version.';
+            if (restored === 'The previous version was restored.') {
+                restored += ' Restart the app to activate the restored version.';
+            }
         }
         return {
             success: false,
