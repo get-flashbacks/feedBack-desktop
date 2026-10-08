@@ -77,6 +77,7 @@ import {
     nextRecordAfterInstall,
     pluginIdFrom,
     recordAfterPinChange,
+    recordAfterRollback,
     resolveUpdate,
     splitLifecycleRequests,
     updateCandidates,
@@ -814,7 +815,33 @@ async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; m
     }
     catalogBusy = true;
     try {
-        await rollbackInstall(getPluginsDir(), entry.installDir);
+        const result = await rollbackInstall(getPluginsDir(), entry.installDir);
+        // The record must describe the copy that is now on disk. A restore pulls
+        // the version from the pin that nextRecordAfterInstall left when the
+        // install that created the backup was recorded without a confirmed
+        // activation; if that pin is gone the restored identity is unknown and
+        // the record is dropped rather than left claiming a version not on disk.
+        // A 'removed' result means nothing was restored, so any record is stale.
+        const record = recordedFor(entry.id);
+        if (record) {
+            const now = new Date().toISOString();
+            if (result === 'restored') {
+                const restored = recordAfterRollback(record, now);
+                if (restored) {
+                    await updateInstalledState(installedStateDir(), (records) => {
+                        records.set(entry.id, restored);
+                    }, now);
+                } else {
+                    await updateInstalledState(installedStateDir(), (records) => {
+                        records.delete(entry.id);
+                    }, now);
+                }
+            } else {
+                await updateInstalledState(installedStateDir(), (records) => {
+                    records.delete(entry.id);
+                }, now);
+            }
+        }
         // The restored version is back on disk, but the backend is still running
         // the broken copy that was there before the restore — so restart it the
         // same way the per-plugin update/downgrade paths do, and only fall back to

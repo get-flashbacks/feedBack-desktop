@@ -267,6 +267,50 @@ export function nextRecordAfterInstall(
 }
 
 /**
+ * The record after a manual rollback restored the backup: the version that was
+ * on disk becomes the recorded version, pulled from the pin that
+ * `nextRecordAfterInstall` left at `previousVersions[0]` when the install that
+ * created the backup was recorded without a confirmed activation. The displaced
+ * version drops onto the front of the history, and the pin is cleared — it was
+ * a statement about the version that was installed, not the one restored.
+ *
+ * Returns null when the restored version cannot be recovered from the record
+ * (history is empty), so the caller can drop the record rather than let it
+ * claim a version that is no longer on disk.
+ */
+export function recordAfterRollback(
+    record: InstalledPluginRecord,
+    now: string,
+): InstalledPluginRecord | null {
+    const restored = record.previousVersions?.[0];
+    if (!restored) return null;
+    // The version that was on disk is now history. pinFor returns null for a
+    // copy recorded before schema v2 (no archive sizes), in which case it simply
+    // drops out of the history rather than being pinned.
+    const displaced = pinFor(record);
+    const history = (displaced
+        ? [displaced, ...(record.previousVersions ?? []).slice(1)]
+        : (record.previousVersions ?? []).slice(1)
+    ).slice(0, MAX_HISTORY);
+    return {
+        id: record.id,
+        installDir: record.installDir,
+        version: restored.version,
+        repository: restored.repository,
+        commit: restored.commit,
+        archiveSha256: restored.archiveSha256,
+        installedAt: now,
+        catalogRevision: restored.catalogRevision,
+        source: restored.source,
+        downloadBytes: restored.downloadBytes,
+        installedBytes: restored.installedBytes,
+        enabled: record.enabled,
+        pinned: false,
+        ...(history.length ? { previousVersions: history } : {}),
+    };
+}
+
+/**
  * The record after the user pinned (or unpinned) a version. Pinning is only ever
  * a statement about what is installed now, so it is refused for a plugin that is
  * not installed, and unpinning is always allowed.
@@ -335,8 +379,8 @@ export interface LifecycleView {
      * A plain-English recovery instruction for this copy, or "" when nothing
      * applies. Computed from `canRollback` and `downgradeVersions` so the screen
      * always agrees with the operations it actually offers (lifecycle 4/6): when
-     * a backup is kept the user is told to "Restore previous version", and when
-     * the backup was already committed away they are told which earlier version
+     * a backup is kept the user is told to "Restore previous", and when the
+     * backup was already committed away they are told which earlier version
      * a "Downgrade" would reinstall. Not shown for disabled or uninstalled
      * copies — neither has an activation to recover.
      */
@@ -366,7 +410,7 @@ export function lifecycleView(options: {
     let recoveryInstructions = '';
     if (installed && !disabled) {
         if (canRollback) {
-            recoveryInstructions = `Use "Restore previous version" to roll back ${entry.name} to the version installed before this one if this version does not work.`;
+            recoveryInstructions = `Use "Restore previous" to roll back ${entry.name} to the version installed before this one if this version does not work.`;
         } else if (downgradeCandidates(record).length > 0) {
             recoveryInstructions = `Use "Downgrade" to return ${entry.name} to an earlier verified version if this version does not work.`;
         }

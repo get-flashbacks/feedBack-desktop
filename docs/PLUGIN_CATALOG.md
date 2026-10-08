@@ -326,7 +326,7 @@ Notes that matter when changing any of this:
 When an update or downgrade fails to activate, the previous version is restored
 from the backup slot and the backend restarted so the restored copy loads again.
 This happens automatically during the install flow, and the user can trigger it
-manually too: the catalog row shows a "Restore previous version" button whenever
+manually too: the catalog row shows a "Restore previous" button whenever
 `canRollback` is true (a backup is kept and the plugin is not disabled).
 
 The row also carries a `recoveryInstructions` string whenever a recovery path is
@@ -343,6 +343,13 @@ for a disabled or uninstalled copy — neither has a live activation to recover.
   `lifecycleView` (see `src/main/plugin-lifecycle.ts`) from `canRollback` and
   `downgradeVersions`, so the advice the screen gives always matches the button
   the screen actually offers.
+- **The record is rewritten to the restored version.** `rollbackCatalogPlugin`
+  calls `recordAfterRollback` after `rollbackInstall` returns `'restored'`, so the
+  installed-state record describes the copy that is now on disk — the version
+  that was rolled back from becomes the newest entry in `previousVersions`,
+  and the pin is cleared. When the restored version's identity cannot be
+  recovered from the record (no history pin), the record is dropped rather than
+  left claiming a version that is no longer on disk.
 
 ## First-run guided selection
 

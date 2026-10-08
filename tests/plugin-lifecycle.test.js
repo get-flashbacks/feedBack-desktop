@@ -33,6 +33,7 @@ const {
     nextRecordAfterInstall,
     pluginIdFrom,
     recordAfterPinChange,
+    recordAfterRollback,
     resolveUpdate,
     splitLifecycleRequests,
     updateCandidates,
@@ -370,6 +371,60 @@ test('pinning is a statement about what is installed now, and never mutates the 
     assert.strictEqual(recordAfterPinChange(pinned, false).pinned, false, 'unpinning is always allowed');
 });
 
+// ── Record after a rollback (issue #23, lifecycle 4/6) ────────────────────────
+
+test('recordAfterRollback swaps the record to the restored version and keeps the displaced one as history', () => {
+    // Simulate the state after an unconfirmed update: record claims 1.2.0, the
+    // backup (1.0.0) is still on disk, and previousVersions[0] is the pin for
+    // the version that was on disk before 1.2.0.
+    const displaced = record({ version: '1.2.0' });
+    const before = nextRecordAfterInstall(
+        recordWithHistory('1.0.0', 1),
+        catalogEntry({ version: '1.2.0' }),
+        CATALOG_REVISION,
+        INSTALLED_AT,
+    );
+    assert.strictEqual(before.version, '1.2.0');
+    assert.deepStrictEqual(before.previousVersions.map(pin => pin.version), ['1.0.0', '0.1.0']);
+
+    const restored = recordAfterRollback(before, '2026-10-08T01:00:00.000Z');
+    assert.ok(restored, 'a pin exists to restore from');
+    assert.strictEqual(restored.version, '1.0.0', 'the record now claims the restored version');
+    assert.strictEqual(restored.installedAt, '2026-10-08T01:00:00.000Z');
+    assert.strictEqual(restored.pinned, false, 'the pin was about the version that was installed, not the one restored');
+    assert.strictEqual(restored.enabled, before.enabled, 'enabled state is carried over');
+    assert.deepStrictEqual(restored.previousVersions.map(pin => pin.version), ['1.2.0', '0.1.0'], 'the rolled-back version joins history');
+});
+
+test('recordAfterRollback drops the record when the restored version cannot be recovered', () => {
+    // A record with no history (e.g. first install recorded without a confirmed
+    // activation) has no pin to restore from.
+    const first = record({ version: '1.0.0' });
+    assert.ok(!('previousVersions' in first));
+    assert.strictEqual(recordAfterRollback(first, INSTALLED_AT), null);
+});
+
+test('recordAfterRollback re-pins through multiple rollback cycles', () => {
+    // 1.0.0 → 1.1.0 (unconfirmed, backup kept) → restore to 1.0.0
+    const afterFirstInstall = nextRecordAfterInstall(
+        recordWithHistory('1.0.0', 1),
+        catalogEntry({ version: '1.1.0' }),
+        CATALOG_REVISION,
+        INSTALLED_AT,
+    );
+    const rolledBack = recordAfterRollback(afterFirstInstall, '2026-10-08T01:00:00.000Z');
+    assert.ok(rolledBack, 'a pin exists to restore from');
+    assert.strictEqual(rolledBack.version, '1.0.0');
+    assert.deepStrictEqual(rolledBack.previousVersions.map(pin => pin.version), ['1.1.0', '0.1.0']);
+
+    // 1.0.0 (restored) → 1.2.0 (unconfirmed) → restore to 1.0.0 again
+    const afterSecondInstall = nextRecordAfterInstall(rolledBack, catalogEntry({ version: '1.2.0' }), CATALOG_REVISION, INSTALLED_AT);
+    const rolledBackAgain = recordAfterRollback(afterSecondInstall, '2026-10-08T02:00:00.000Z');
+    assert.ok(rolledBackAgain, 'a pin exists to restore from');
+    assert.strictEqual(rolledBackAgain.version, '1.0.0');
+    assert.deepStrictEqual(rolledBackAgain.previousVersions.map(pin => pin.version), ['1.2.0', '1.1.0', '0.1.0']);
+});
+
 // ── User data ───────────────────────────────────────────────────────────────
 
 test('a confirmed data delete is addressed inside the config dir only', () => {
@@ -437,8 +492,8 @@ test('a copy parked on disk is disabled whatever the record claims', () => {
             downgradeVersions: 0,
             disabled: false,
             canRollback: true,
-            // A live copy with a backup gets "Restore previous version" instructions.
-            recoveryInstructions: 'Use "Restore previous version" to roll back Metronome to the version installed before this one if this version does not work.',
+            // A live copy with a backup gets "Restore previous" instructions.
+            recoveryInstructions: 'Use "Restore previous" to roll back Metronome to the version installed before this one if this version does not work.',
         },
     );
 
@@ -472,7 +527,7 @@ test('the view carries the downgrade versions the screen may offer', () => {
     assert.strictEqual(view.updateStatus, 'current');
     // A backup is available, so the restore instruction is offered even though
     // downgrade history exists too — the backup is the shorter way back.
-    assert.match(view.recoveryInstructions, /Restore previous version/);
+    assert.match(view.recoveryInstructions, /Restore previous/);
     assert.ok(!view.recoveryInstructions.includes('Downgrade'));
 });
 
@@ -487,7 +542,7 @@ test('recovery instructions point at rollback when a backup is kept', () => {
     });
     assert.match(
         view.recoveryInstructions,
-        /Use "Restore previous version" to roll back/,
+        /Use "Restore previous" to roll back/,
         'a live copy with a backup is told to restore the previous version',
     );
 });

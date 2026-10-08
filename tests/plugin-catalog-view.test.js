@@ -882,7 +882,7 @@ test('transitive dependencies are adopted in the same resolve, not one per round
 test('a re-render resolves the selection once, not once per row', async () => {
     const { document, resolveCalls } = await runScreen(
         [
-            entry({ id: 'alpha', name: 'Practice Alpha', canRollback: true, recoveryInstructions: 'Use "Restore previous version" to roll back Practice Alpha.' }),
+            entry({ id: 'alpha', name: 'Practice Alpha', canRollback: true, recoveryInstructions: 'Use "Restore previous" to roll back Practice Alpha.' }),
             entry({ id: 'beta', name: 'Practice Beta' }),
             entry({ id: 'gamma', name: 'Tools Gamma' }),
         ],
@@ -915,7 +915,7 @@ test('recovery instructions are shown on the row when a rollback or downgrade pa
             installedVersion: '1.0.0',
             activeSource: 'installed',
             canRollback: true,
-            recoveryInstructions: 'Use "Restore previous version" to roll back Practice Alpha.',
+            recoveryInstructions: 'Use "Restore previous" to roll back Practice Alpha.',
         }),
         entry({
             id: 'beta',
@@ -944,7 +944,7 @@ test('recovery instructions are shown on the row when a rollback or downgrade pa
     // The two rows with instructions surface them (escaped); the empty one does not.
     assert.match(
         alphaMeta.innerHTML,
-        /Use &quot;Restore previous version&quot; to roll back Practice Alpha/,
+        /Use &quot;Restore previous&quot; to roll back Practice Alpha/,
         'restore instructions are escaped and visible',
     );
     assert.match(
