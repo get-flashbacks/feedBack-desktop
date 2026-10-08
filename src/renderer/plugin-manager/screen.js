@@ -596,6 +596,7 @@
         if (!ids.length) {
             catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
+            mirrorPlanOntoRows(null);
             updateInstallLabel();
             return;
         }
