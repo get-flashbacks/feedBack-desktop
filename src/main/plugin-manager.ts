@@ -543,10 +543,12 @@ export interface CatalogInstallResult {
 
 /**
  * Split a request into entries this build can run and ones it cannot, with the
- * compatibility reason in place of a download. The install gate asks the same
- * compatibilityFor() question the cards ask, so a plugin the backend cannot
- * load is refused before the network is touched — the actionable explanation
- * the cards show is enforced where the installs happen, not only drawn.
+ * reason in place of a download. The install gate asks the same questions the
+ * cards ask: compatibilityFor() for whether the backend can load the plugin at
+ * all, and the catalog's lifecycle status for whether this build allows it at
+ * all — a withdrawn or security-blocked entry is refused here for the same
+ * reason setCatalogPluginEnabled refuses to re-enable it, so the reason the row
+ * shows is enforced where the installs happen, not only drawn.
  */
 function refuseIncompatible(
     ids: string[],
@@ -560,7 +562,10 @@ function refuseIncompatible(
         // An id outside the catalog is left for the batch to report by name —
         // that is a bogus request, not an incompatibility.
         const verdict = entry ? compatibilityFor(entry, build) : null;
-        if (verdict && verdict.ok === false) {
+        const blocked = entry ? blockedReason(entry) : null;
+        if (blocked) {
+            refused.push({ id, name: entry!.name, success: false, message: blocked });
+        } else if (verdict && verdict.ok === false) {
             refused.push({ id, name: entry!.name, success: false, message: verdict.reason ?? `${entry!.name} does not fit this build.` });
         } else {
             allowed.push(id);
@@ -1156,10 +1161,11 @@ export async function setCatalogPluginEnabled(id: unknown, enabled: unknown): Pr
     if (catalogBusy) return { success: false, message: 'A plugin installation is already running.' };
     // Enabling is gated by the catalog's lifecycle status: a hard-blocked entry
     // cannot be re-enabled on a build that carries the block. The override path
-    // is explicit — the user must move to a build that no longer carries it (i.e.
-    // defer this desktop update, or apply one where the entry is no longer
-    // security-blocked / withdrawn). Disabling is always allowed; only
-    // re-enabling is refused, so the record stays consistent with what is on disk.
+    // is explicit — apply a release where the entry is no longer
+    // security-blocked / withdrawn. Staying on this release is deliberately not
+    // offered: the catalog that blocks the entry is this build's own, so
+    // staying keeps it blocked. Disabling is always allowed; only re-enabling is
+    // refused, so the record stays consistent with what is on disk.
     if (enabled) {
         let catalogEntry: CatalogEntry | undefined;
         try {
@@ -1172,7 +1178,7 @@ export async function setCatalogPluginEnabled(id: unknown, enabled: unknown): Pr
             const reason = blockedReason(catalogEntry) ?? `${name} cannot be enabled here.`;
             return {
                 success: false,
-                message: `${reason} To re-enable it, apply a desktop update that no longer blocks ${name}, or stay on your current release.`,
+                message: `${reason} To re-enable it, apply a desktop update that no longer blocks ${name}.`,
             };
         }
     }

@@ -39,6 +39,8 @@ export interface SelectionEntry {
     installedVersion: string | null;
     /** True when the app ships this plugin as a core bundled plugin. */
     bundled: boolean;
+    /** True when this build hard-blocks the entry (withdrawn / security-blocked). */
+    blocked: boolean;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -78,6 +80,7 @@ export function toSelectionEntry(raw: unknown): SelectionEntry | null {
         downloadBytes: finiteNumber(size.downloadBytes),
         installedVersion: typeof raw.installedVersion === 'string' && raw.installedVersion ? raw.installedVersion : null,
         bundled: raw.bundled === true,
+        blocked: raw.blocked === true,
     };
 }
 
@@ -93,9 +96,13 @@ export function toSelectionEntries(raw: unknown[]): SelectionEntry[] {
     return entries;
 }
 
-/** Entries the wizard is allowed to offer as a choice (hidden ones only come along as dependencies). */
+/**
+ * Entries the wizard is allowed to offer as a choice: hidden ones only come
+ * along as dependencies, and a blocked entry (withdrawn / security-blocked) is
+ * never offered — the install gate would refuse it with the same reason.
+ */
 export function selectableEntries(entries: SelectionEntry[]): SelectionEntry[] {
-    return entries.filter(e => e.tier !== 'hidden');
+    return entries.filter(e => e.tier !== 'hidden' && !e.blocked);
 }
 
 export function isLocked(entry: SelectionEntry): boolean {
@@ -179,8 +186,10 @@ export function recommendIds(entries: SelectionEntry[], answers: WizardAnswers):
     const ids: string[] = [];
     for (const entry of entries) {
         // Hidden entries are never offered or recommended — they only ever come
-        // along as somebody else's dependency.
-        if (entry.tier === 'hidden') continue;
+        // along as somebody else's dependency. A blocked entry (withdrawn /
+        // security-blocked) is not recommended either: the install gate refuses
+        // it, so pre-checking it would only promise something that cannot happen.
+        if (entry.tier === 'hidden' || entry.blocked) continue;
         const byInstrument = chosen.size > 0 && (
             entry.instruments.length === 0 || entry.instruments.some(i => chosen.has(i))
         );

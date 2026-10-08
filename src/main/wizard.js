@@ -144,7 +144,10 @@
                 requiredBy.set(dep, [...(requiredBy.get(dep) || []), id]);
             }
         }
-        const visible = entries.filter(e => e.tier !== 'hidden' || plan.ids.includes(e.id));
+        // A blocked entry (withdrawn / security-blocked) is never offered; it is
+        // only listed when something else pulled it into the plan, and the
+        // install gate names it if it refuses.
+        const visible = entries.filter(e => (e.tier !== 'hidden' && !e.blocked) || plan.ids.includes(e.id));
 
         for (const entry of visible) {
             const row = document.createElement('div');

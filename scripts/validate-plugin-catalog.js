@@ -31,6 +31,9 @@ const VERSION_PATTERN = /^(?:[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+-[0-9A
 const SOURCES = new Set(['get-flashbacks', 'upstream-official', 'reviewed-community']);
 const STABILITIES = new Set(['stable', 'beta', 'experimental']);
 const STATUSES = new Set(['active', 'deprecated', 'withdrawn', 'security-blocked']);
+// Statuses the desktop refuses to install or recommend on the build that
+// carries them; keep in step with isEntryBlocked in src/main/plugin-preflight.ts.
+const BLOCKED_STATUSES = new Set(['withdrawn', 'security-blocked']);
 const TIERS = new Set(['essential', 'recommended', 'optional', 'hidden']);
 const TOP_LEVEL_KEYS = new Set(Object.keys(schema.properties));
 const ENTRY_KEYS = new Set(Object.keys(entrySchema.properties));
@@ -122,8 +125,15 @@ function validateCatalog(catalog) {
     if (entry.selection.defaultSelected && entry.selection.tier === 'hidden') fail(`${label}.selection cannot default-select a hidden plugin`);
   }
   if (entry.status !== undefined && !STATUSES.has(entry.status)) fail(`${label}.status is invalid`);
-  if (entry.status === 'withdrawn' && entry.selection && (entry.selection.tier === 'essential' || entry.selection.tier === 'recommended')) {
-    fail(`${label}.selection cannot default-select or recommend a withdrawn plugin`);
+  // A blocked entry is never one the desktop offers: not the default selection,
+  // not locked in as essential, not in the recommended set. The message names
+  // exactly those three cases so it cannot lag the rule.
+  if (BLOCKED_STATUSES.has(entry.status) && entry.selection && (
+    entry.selection.defaultSelected
+    || entry.selection.tier === 'essential'
+    || entry.selection.tier === 'recommended'
+  )) {
+    fail(`${label}.selection cannot default-select or recommend a ${entry.status} plugin`);
   }
   if (ids.has(entry.id)) fail(`${label}.id duplicates ${entry.id}`); ids.add(entry.id);
     if (dirs.has(entry.installDir)) fail(`${label}.installDir duplicates ${entry.installDir}`); dirs.add(entry.installDir);

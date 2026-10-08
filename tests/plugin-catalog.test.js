@@ -55,3 +55,25 @@ test('catalog validation accepts prerelease versions and rejects malformed ones'
   entry.version = '1.2.3-';
   assert(validateCatalog({ schemaVersion: 1, entries: [entry] }).some(error => error.includes('version must be semver-like')));
 });
+
+test('catalog validation never selects, locks or recommends a blocked plugin', () => {
+  const entry = validEntry('blocked');
+  entry.status = 'withdrawn';
+  entry.selection = { tier: 'recommended', defaultSelected: false };
+  let errors = validateCatalog({ schemaVersion: 1, entries: [entry] });
+  assert(errors.some(error => error.includes('cannot default-select or recommend a withdrawn plugin')));
+
+  entry.status = 'security-blocked';
+  entry.selection = { tier: 'essential', defaultSelected: false };
+  errors = validateCatalog({ schemaVersion: 1, entries: [entry] });
+  assert(errors.some(error => error.includes('cannot default-select or recommend a security-blocked plugin')));
+
+  entry.selection = { tier: 'optional', defaultSelected: true };
+  errors = validateCatalog({ schemaVersion: 1, entries: [entry] });
+  assert(errors.some(error => error.includes('cannot default-select or recommend a security-blocked plugin')));
+
+  // Blocked is only about being offered: the entry itself may stay in the
+  // catalog so the runtime can name it when it refuses.
+  entry.selection = { tier: 'optional', defaultSelected: false };
+  assert.deepStrictEqual(validateCatalog({ schemaVersion: 1, entries: [entry] }), []);
+});

@@ -426,13 +426,16 @@ test('listCatalog attaches the lifecycle view so the install list keeps its cont
 test('the install action gates incompatible entries in main, with the reason, before downloading', () => {
     // The cards ask compatibilityFor(); the install path must ask the same
     // single question, so a plugin the backend cannot load is refused with the
-    // same words the card showed — not downloaded first and failed later.
+    // same words the card showed — not downloaded first and failed later. The
+    // same seam refuses a hard-blocked entry with the reason the enable gate
+    // uses, so "this build will not run it" is enforced, not only documented.
     const main = fs.readFileSync(path.join(ROOT, 'src', 'main', 'plugin-manager.ts'), 'utf8');
     const start = main.indexOf('function refuseIncompatible(');
     assert.ok(start !== -1, 'installFromCatalog should split off entries this build cannot run');
     const gate = main.slice(start, main.indexOf('\n}', start));
     assert.match(gate, /compatibilityFor\(/, 'the same rule the cards use');
     assert.match(gate, /verdict\.reason/, 'the refusal carries the actionable reason');
+    assert.match(gate, /blockedReason\(/, 'a withdrawn or security-blocked entry is refused with the block reason');
     const installStart = main.indexOf('export async function installFromCatalog(');
     const install = main.slice(installStart, main.indexOf('\n}', installStart));
     assert.match(install, /refuseIncompatible\(/, 'the batch only receives what fits');

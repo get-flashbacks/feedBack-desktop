@@ -64,7 +64,10 @@ renderer reaches it through `window.feedBackDesktop.plugins`:
   `security-blocked`, so the row can show why and the enable control can refuse
   re-enabling it), `trustedSource` (whether the archive would be downloaded from
   the owner the entry's `source` trust class claims — `get-flashbacks` sources
-  only resolve to a `get-flashbacks` fork, never an arbitrary upstream), `compat`
+  only resolve to a `get-flashbacks` fork, never an arbitrary upstream — and
+  always `true` for a row that loaded at all, since `loadCatalog` drops any
+  entry whose owner contradicts its class; it states the rule the install gate
+  enforces rather than re-checking it per row), `compat`
   (the entry's declared `compatibility` bounds judged against this build by
   `src/main/plugin-compat.ts`: `{ ok, requirements, reason }`, where
   `requirements` is the display phrase for the bounds ("fee[dB]ack core 0.3.0
@@ -83,7 +86,9 @@ renderer reaches it through `window.feedBackDesktop.plugins`:
   pinned transfer size of `outstanding`.
 - `installCatalog(ids)` — install a batch by catalog id. Entries whose
   `compat` verdict is `ok: false` are refused (with that reason) before any
-  download, as are copies the recorded state forbids touching (pinned,
+  download, as are entries this build hard-blocks (`withdrawn` or
+  `security-blocked`, refused with the same `blockedReason` sentence the row
+  shows) and copies the recorded state forbids touching (pinned,
   disabled, or behind the catalog). The answer is `{ success, message,
   results, networkRequired? }`; `networkRequired` is set when the failures are
   connectivity-shaped, so the UI reports "a connection is required" and keeps
@@ -369,9 +374,13 @@ A catalog entry may carry an optional `status`: `active` (the default when
 absent), `deprecated` (still ships and runs, but users are warned it is on its
 way out), `withdrawn` (removed by the maintainer — the plugin is dropped from the
 catalog and disabled on disk), or `security-blocked` (a known-insecure release
-that the desktop refuses to run on this build). The schema and the runtime
-validator both reject an unknown `status`, so a damaged entry fails closed to
-`active` rather than inventing a verdict.
+that the desktop refuses to run on this build). The schema rejects an unknown
+`status`, so the validation script keeps a damaged value out of CI, and the
+runtime validator drops the whole entry rather than defaulting it: the row
+disappears from the catalog list, preflight has no record to judge, and the
+enable gate finds no entry to refuse. `entryStatus` degrades a malformed value
+to `active` only for callers that bypass that validation — it is a defensive
+fallback for raw objects, not the catalog's failure mode.
 
 `src/main/plugin-preflight.ts` (issue #24) applies the same question twice:
 - against the *current* build, for the catalog row: `isEntryBlocked` /
@@ -392,12 +401,15 @@ Behaviour the preflight enforces and the screen shows:
   silently reinstalled from an arbitrary upstream.
 - **A deprecated plugin stays enabled and warns.** It runs on the target (it is
   compatible) but the row carries the advisory so the user can migrate off it.
-- **Security-blocked and withdrawn entries are disabled and cannot be re-enabled
-  on the build that carries the block.** Re-enabling them requires an explicit
-  override path: the user must move to a build where the entry is no longer
-  `security-blocked` / `withdrawn` (i.e. defer this desktop update, or apply a
-  release where the entry is restored / unblocked). `setCatalogPluginEnabled`
-  refuses to enable a hard-blocked entry and names that override in its message.
+- **Security-blocked and withdrawn entries are disabled, cannot be re-enabled,
+  and cannot be freshly installed on the build that carries the block.**
+  Re-enabling requires an explicit override path: a release where the entry is
+  restored or unblocked. Staying on this release is not a path — its own catalog
+  is what carries the block — so `setCatalogPluginEnabled` refuses to enable a
+  hard-blocked entry and names that override in its message, the install gate
+  (`refuseIncompatible`) refuses a fresh install with the same `blockedReason`
+  sentence, and the first-run wizard neither lists nor recommends a blocked
+  entry.
 - **A missing or damaged catalog does not deny an update.** A lost catalog yields
   an empty preflight report ("nothing to check"), so a corrupted bundled file
   cannot block a security release.
@@ -439,10 +451,16 @@ from it (`https://codeload.github.com/OWNER/REPO/zip/COMMIT`) is anchored to tha
 class: a `get-flashbacks` entry resolves to a `get-flashbacks` fork and nothing
 else (there is no upstream fork of a fork to fall back to), and an
 `upstream-official` entry resolves to `got-feedback`, the upstream project's own
-organization. The verifier in `plugin-preflight.ts` (`isTrustedCatalogSource`)
-re-checks exactly that before any install; the shipped catalog installs every
-entry from a `get-flashbacks` fork, so no installation file is ever sourced from
-an unverified third-party owner.
+organization. The check that guards every install is `validateCatalogEntry`'s
+`SOURCE_OWNERS` comparison (`src/main/plugin-installer.ts`), reached from
+`loadCatalog` and from `installCatalogEntry`: an entry whose owner contradicts
+its class is dropped before the batch can fetch a byte of it. The shipped
+catalog installs every entry from a `get-flashbacks` fork, so no installation
+file is ever sourced from an unverified third-party owner.
+`isTrustedCatalogSource` (`src/main/plugin-preflight.ts`) restates the same rule
+for the row's `trustedSource` badge — it is read by `listCatalog`, not by the
+install path, so every row that survived `loadCatalog` reports `true`: the badge
+states the rule the install gate enforced, it is not a second live check.
 
 ## First-run guided selection
 
@@ -468,6 +486,7 @@ The decisions are pure functions in `src/main/plugin-selection.ts`, and they are
 | `category` | Becomes a feature question; a chosen category recommends that category's entries. |
 | `selection.tier` | `essential` is never a choice (always selected, and always part of the install set); `hidden` is never offered or recommended and only arrives as somebody else's dependency; `recommended`/`optional` are ordinary choices. |
 | `selection.defaultSelected` | Recommended even with no answers given. |
+| `status` | A blocked entry (`withdrawn` / `security-blocked`) is never offered, asked about or recommended — the wizard skips it and the install gate refuses it with the block reason, so it stays in the catalog only so it can be named when refused. |
 | `dependencies` | Pulled in automatically, locked in the review list, ordered before their dependents. |
 | `conflicts` | Pruned deterministically: auto-added dependencies win over `essential` entries, which win over plain preferences. A dropped dependency drops its dependents too. |
 

@@ -53,6 +53,7 @@ function row(id, overrides = {}) {
         },
         ...(overrides.installedVersion ? { installedVersion: overrides.installedVersion } : {}),
         ...(overrides.bundled ? { bundled: true } : {}),
+        ...(overrides.blocked ? { blocked: true } : {}),
         ...(overrides.activeSource ? { activeSource: overrides.activeSource } : {}),
     };
 }
@@ -156,6 +157,27 @@ test('a different instrument gets a different set', () => {
 
 test('essentials and catalog defaults are recommended regardless of answers', () => {
     assert.deepStrictEqual(recommend({ instruments: [], categories: [] }), ['always', 'core']);
+});
+
+test('a blocked entry is never offered, asked about or recommended', () => {
+    const list = entries([
+        row('ok', { instruments: ['guitar'], category: 'practice' }),
+        row('gone', { blocked: true, tier: 'essential', instruments: ['banjo'], category: 'percussion' }),
+        row('unsafe', { blocked: true, defaultSelected: true }),
+    ]);
+    // It stays a catalog entry: a request for it must be answered by name, so
+    // the install gate can refuse it with the block reason instead of it
+    // silently disappearing from the plan.
+    assert.deepStrictEqual(list.map(e => e.id), ['ok', 'gone', 'unsafe']);
+    assert.deepStrictEqual(selection.selectableEntries(list).map(e => e.id), ['ok']);
+    // Neither the essential tier nor the default flag gets past the block.
+    assert.deepStrictEqual(selection.recommendIds(list, { instruments: [], categories: [] }), []);
+    // The question list is built from the offered set, so a blocked entry's
+    // tags never shape it either.
+    const questions = selection.buildWizardQuestions(list);
+    assert.deepStrictEqual(questions.instruments.map(o => o.id), ['guitar']);
+    assert.deepStrictEqual(questions.categories.map(o => o.id), ['practice']);
+    assert.deepStrictEqual(selection.resolveSelection(list, ['gone']).ids, ['gone']);
 });
 
 test('chosen categories recommend their plugins on top of the instrument match', () => {

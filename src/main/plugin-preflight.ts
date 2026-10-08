@@ -63,11 +63,12 @@ export function blockedReason(entry: CatalogEntry): string | null {
 
 /**
  * Whether enabling the plugin is permitted on the running build. Hard-blocked
- * entries cannot be re-enabled without an explicit override path — the user must
- * move to a build that no longer carries the block (i.e. defer the desktop
- * update, or apply one where the entry is no longer blocked). Deprecated entries
- * can be enabled; they only warn. Returns the same answer the enable-gate in
- * plugin-manager.ts enforces, so the row and the operation agree.
+ * entries cannot be re-enabled without an explicit override path: a build where
+ * the entry is no longer blocked (one that restores or unblocks it). The build
+ * that carries the block is the running one — its own catalog is what refuses —
+ * so staying put is not a way out. Deprecated entries can be enabled; they only
+ * warn. Returns the same answer the enable-gate in plugin-manager.ts enforces,
+ * so the row and the operation agree.
  */
 export function canReenablePlugin(entry: CatalogEntry): boolean {
     return !isEntryBlocked(entry);
