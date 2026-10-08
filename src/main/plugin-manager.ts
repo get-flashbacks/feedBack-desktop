@@ -846,6 +846,17 @@ async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; m
                     // other record writes do and keep going.
                     console.error('[plugins] could not record the rollback', e);
                 }
+            } else if (record) {
+                // Restored but the manifest could not be read, so the version on
+                // disk cannot be matched to a history pin. Drop the stale record
+                // rather than leave it claiming a version that cannot be verified.
+                try {
+                    await updateInstalledState(installedStateDir(), (records) => {
+                        records.delete(entry.id);
+                    }, new Date().toISOString());
+                } catch (e) {
+                    console.error('[plugins] could not record the rollback', e);
+                }
             }
         } else {
             try {
