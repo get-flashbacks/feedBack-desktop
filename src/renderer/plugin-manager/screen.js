@@ -196,9 +196,11 @@
         if (!catalogProgressWrap) return;
         catalogProgressWrap.classList.remove('hidden');
         catalogProgress.value = percent;
-        catalogProgressText.textContent = percent >= 100
-            ? `${name} — installed.`
-            : `${name} — downloading… ${percent}%`;
+        if (catalogProgressText) {
+            catalogProgressText.textContent = percent >= 100
+                ? `${name} — installed.`
+                : `${name} — downloading… ${percent}%`;
+        }
     }
 
     function setCatalogBusy(busy) {
@@ -272,10 +274,9 @@
                 else if (entry.updateStatus === 'ahead') staticReason = 'The catalog is older than the copy installed. Use Downgrade to go back.';
                 else if (!installable) staticReason = 'Installed at this version already.';
                 if (staticReason) box.title = staticReason;
-                box.setAttribute('aria-describedby', [
-                    incompatible ? 'pm-row-reason-' + entry.id : '',
-                    'pm-row-lock-' + entry.id,
-                ].filter(Boolean).join(' '));
+                if (incompatible) {
+                    box.setAttribute('aria-describedby', 'pm-row-reason-' + entry.id);
+                }
                 if (box.disabled) catalogSelection.delete(entry.id);
                 box.checked = catalogSelection.has(entry.id);
                 box.addEventListener('change', async () => {
@@ -549,6 +550,7 @@
         for (const handleEntry of catalogBoxById) {
             const id = handleEntry[0];
             const handle = handleEntry[1];
+            const isIncompatible = !!handle.entry.compat && handle.entry.compat.ok === false;
             if (prunedIds.has(id)) {
                 // Pruned beats locked: a box the plan drops must never read as
                 // to-be-installed, whatever declared it as a dependency.
@@ -557,6 +559,7 @@
                 handle.lockEl.textContent = '';
                 handle.lockEl.classList.add('hidden');
                 handle.box.title = handle.staticReason;
+                if (!isIncompatible) handle.box.removeAttribute('aria-describedby');
             } else if (lockedBy.has(id)) {
                 handle.box.disabled = true;
                 if (!handle.staticDisabled) {
@@ -569,12 +572,14 @@
                     handle.box.title = lockText;
                     handle.lockEl.textContent = lockText;
                     handle.lockEl.classList.remove('hidden');
+                    handle.box.setAttribute('aria-describedby', 'pm-row-lock-' + id);
                 } else {
                     // Already on disk (bundled, or held): the row says what is
                     // on it, and a "locked into the plan" line over a checkbox
                     // that was never selectable would only confuse.
                     handle.lockEl.textContent = '';
                     handle.lockEl.classList.add('hidden');
+                    if (!isIncompatible) handle.box.removeAttribute('aria-describedby');
                 }
             } else {
                 handle.box.disabled = handle.staticDisabled;
@@ -582,6 +587,7 @@
                 handle.lockEl.textContent = '';
                 handle.lockEl.classList.add('hidden');
                 handle.box.title = handle.staticReason;
+                if (!isIncompatible) handle.box.removeAttribute('aria-describedby');
             }
         }
         const locked = [...lockedBy]
@@ -594,7 +600,6 @@
         if (!catalogDependencyInfo) return;
         const ids = [...catalogSelection];
         if (!ids.length) {
-            catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
             mirrorPlanOntoRows(null);
             updateInstallLabel();
@@ -642,17 +647,14 @@
             }
             if (lines.length) {
                 catalogDependencyInfo.textContent = lines.join('\n');
-                catalogDependencyInfo.classList.remove('hidden');
                 return;
             }
-            catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
         } catch (e) {
             // A resolver that cannot answer must not pretend the plan is fine:
-            // hide the stale note and say the selection could not be resolved,
+            // clear the stale note and say the selection could not be resolved,
             // rather than leaving the install button looking ready over an
             // unknown set.
-            catalogDependencyInfo.classList.add('hidden');
             catalogDependencyInfo.textContent = '';
             showCatalogMessage('Could not resolve the selection. Try again before installing.', false);
         }
@@ -709,7 +711,6 @@
                 }
 
                 if (result.success && catalogDependencyInfo) {
-                    catalogDependencyInfo.classList.add('hidden');
                     catalogDependencyInfo.textContent = '';
                 }
                 await refreshCatalog();
@@ -720,6 +721,7 @@
                 unsubscribe();
                 catalogState.clear();
                 catalogProgressWrap.classList.add('hidden');
+                if (catalogProgressText) catalogProgressText.textContent = '';
                 setCatalogBusy(false);
                 // setCatalogBusy(false) resets the label to the plain form; a
                 // kept selection (a failed install) must put its count back.

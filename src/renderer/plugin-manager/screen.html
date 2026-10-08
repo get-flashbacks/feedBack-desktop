@@ -75,16 +75,16 @@
         <div id="pm-catalog" class="space-y-2" role="group" aria-label="Curated plugins to install">
             <div class="text-sm text-slate-500 italic">Loading...</div>
         </div>
-        <div id="pm-catalog-deps" class="mt-2 text-xs text-slate-400 hidden" role="region" aria-label="Installation plan" aria-live="polite"></div>
+        <div id="pm-catalog-deps" class="mt-2 text-xs text-slate-400" role="region" aria-label="Installation plan" aria-live="polite"></div>
         <div class="flex items-center gap-2 mt-3">
             <button id="pm-catalog-install" class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-sm font-medium">Install selected</button>
             <button id="pm-catalog-cancel" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm hidden">Cancel</button>
         </div>
         <div id="pm-catalog-progress-wrap" class="hidden mt-3">
             <progress id="pm-catalog-progress" class="w-full" value="0" max="100" aria-label="Download progress"></progress>
-            <div id="pm-catalog-progress-text" class="text-xs text-slate-400 mt-1" role="status" aria-live="polite"></div>
         </div>
-        <div id="pm-catalog-msg" class="mt-2 text-sm hidden" role="status" aria-live="polite"></div>
+        <div id="pm-catalog-progress-text" class="text-xs text-slate-400 mt-1" role="status" aria-live="polite"></div>
+        <div id="pm-catalog-msg" class="mt-2 text-sm" role="status" aria-live="polite"></div>
     </div>
 
     <!-- Network sharing (LAN access) -->
