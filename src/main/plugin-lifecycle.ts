@@ -267,6 +267,53 @@ export function nextRecordAfterInstall(
 }
 
 /**
+ * The record after a manual rollback restored the backup: the record is rebuilt
+ * from the history pin whose version matches the copy actually on disk. That
+ * match cannot be `previousVersions[0]` alone — a second install over an
+ * unconfirmed copy keeps the OLD backup and discards the intermediate copy, so
+ * the first history entry names a version that is nowhere on disk. The caller
+ * reads the restored version from the restored manifest (see
+ * `installedVersionOnDisk`) and passes it as `onDiskVersion`.
+ *
+ * Only pins older than the restored version are kept: the version that was
+ * rolled back from is never re-offered as a downgrade, because its activation
+ * was never confirmed. The pin is cleared — it was a statement about the
+ * version that was installed, not the one restored — and `enabled` carries over.
+ *
+ * Returns the record unchanged when the disk already agrees with it, and null
+ * when no history pin matches the restored version, so the caller can drop the
+ * record rather than let it claim a version that is not on disk.
+ */
+export function recordAfterRollback(
+    record: InstalledPluginRecord,
+    onDiskVersion: string,
+    now: string,
+): InstalledPluginRecord | null {
+    if (onDiskVersion === record.version) return record;
+    const restored = record.previousVersions?.find(pin => pin.version === onDiskVersion);
+    if (!restored) return null;
+    const history = (record.previousVersions ?? [])
+        .filter(pin => pin.version !== restored.version && compareVersions(pin.version, restored.version) < 0)
+        .slice(0, MAX_HISTORY);
+    return {
+        id: record.id,
+        installDir: record.installDir,
+        version: restored.version,
+        repository: restored.repository,
+        commit: restored.commit,
+        archiveSha256: restored.archiveSha256,
+        installedAt: now,
+        catalogRevision: restored.catalogRevision,
+        source: restored.source,
+        downloadBytes: restored.downloadBytes,
+        installedBytes: restored.installedBytes,
+        enabled: record.enabled,
+        pinned: false,
+        ...(history.length ? { previousVersions: history } : {}),
+    };
+}
+
+/**
  * The record after the user pinned (or unpinned) a version. Pinning is only ever
  * a statement about what is installed now, so it is refused for a plugin that is
  * not installed, and unpinning is always allowed.
@@ -331,6 +378,16 @@ export interface LifecycleView {
     downgradeVersions: string[];
     disabled: boolean;
     canRollback: boolean;
+    /**
+     * A plain-English recovery instruction for this copy, or "" when nothing
+     * applies. Computed from `canRollback` and `downgradeVersions` so the screen
+     * always agrees with the operations it actually offers (lifecycle 4/6): when
+     * a backup is kept the user is told to "Restore previous", and when the
+     * backup was already committed away they are told which earlier version
+     * a "Downgrade" would reinstall. Not shown for disabled or uninstalled
+     * copies — neither has an activation to recover.
+     */
+    recoveryInstructions: string;
 }
 
 export function lifecycleView(options: {
@@ -348,6 +405,23 @@ export function lifecycleView(options: {
     // vouches for it: the directory is there, so "disabled" is the truth the
     // user can act on, where "not installed" would offer them an install.
     const effectiveStatus: UpdateStatus = installed && disabled ? 'disabled' : status;
+    // Recovery instructions are only relevant while a copy is live: a disabled
+    // copy is already parked (so there is no activation to recover), and an
+    // uninstalled one has nothing on disk. A backup is the recovery path of
+    // first resort; a committed-away backup leaves the recorded history as the
+    // only way back, spoken of as the "Downgrade" buttons the view already lists.
+    // The downgrade note fires only when the history holds a genuinely earlier
+    // candidate: the history can also hold newer pins the user moved away from,
+    // and the advice must not call those "earlier" or present a version whose
+    // activation was never confirmed as the way back.
+    let recoveryInstructions = '';
+    if (installed && !disabled) {
+        if (canRollback) {
+            recoveryInstructions = `Use "Restore previous" to roll back ${entry.name} to the version installed before this one if this version does not work.`;
+        } else if (downgradeCandidates(record).some(pin => compareVersions(pin.version, record?.version) < 0)) {
+            recoveryInstructions = `Use "Downgrade" to return ${entry.name} to an earlier verified version if this version does not work.`;
+        }
+    }
     return {
         installed,
         installedVersion: record?.version ?? null,
@@ -358,6 +432,7 @@ export function lifecycleView(options: {
         downgradeVersions: downgradeCandidates(record).map(pin => pin.version),
         disabled,
         canRollback,
+        recoveryInstructions,
     };
 }
 

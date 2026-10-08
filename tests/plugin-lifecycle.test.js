@@ -33,6 +33,7 @@ const {
     nextRecordAfterInstall,
     pluginIdFrom,
     recordAfterPinChange,
+    recordAfterRollback,
     resolveUpdate,
     splitLifecycleRequests,
     updateCandidates,
@@ -370,6 +371,100 @@ test('pinning is a statement about what is installed now, and never mutates the 
     assert.strictEqual(recordAfterPinChange(pinned, false).pinned, false, 'unpinning is always allowed');
 });
 
+// ── Record after a rollback (issue #23, lifecycle 4/6) ────────────────────────
+
+test('recordAfterRollback swaps the record to the restored version and drops the failed one', () => {
+    // Simulate the state after an unconfirmed update: record claims 1.2.0, the
+    // backup (1.0.0) is still on disk, and previousVersions[0] is the pin for
+    // the version that was on disk before 1.2.0.
+    const before = nextRecordAfterInstall(
+        recordWithHistory('1.0.0', 1),
+        catalogEntry({ version: '1.2.0' }),
+        CATALOG_REVISION,
+        INSTALLED_AT,
+    );
+    assert.strictEqual(before.version, '1.2.0');
+    assert.deepStrictEqual(before.previousVersions.map(pin => pin.version), ['1.0.0', '0.1.0']);
+
+    const restored = recordAfterRollback(before, '1.0.0', '2026-10-08T01:00:00.000Z');
+    assert.ok(restored, 'a pin matches the restored version');
+    assert.strictEqual(restored.version, '1.0.0', 'the record now claims the restored version');
+    assert.strictEqual(restored.installedAt, '2026-10-08T01:00:00.000Z');
+    assert.strictEqual(restored.pinned, false, 'the pin was about the version that was installed, not the one restored');
+    assert.strictEqual(restored.enabled, before.enabled, 'enabled state is carried over');
+    assert.deepStrictEqual(
+        restored.previousVersions.map(pin => pin.version),
+        ['0.1.0'],
+        'only older pins survive: the rolled-back version is not re-offered as a downgrade',
+    );
+});
+
+test('recordAfterRollback matches the backup, not the first history entry', () => {
+    // A second install over an unconfirmed copy keeps the OLD backup and
+    // discards the intermediate copy, so previousVersions[0] names a version
+    // that is nowhere on disk. The record must land on what the manifest says
+    // was restored, not on the stale first entry.
+    const afterFirst = nextRecordAfterInstall(
+        recordWithHistory('1.0.0', 1),
+        catalogEntry({ version: '1.1.0' }),
+        CATALOG_REVISION,
+        INSTALLED_AT,
+    );
+    const afterSecond = nextRecordAfterInstall(afterFirst, catalogEntry({ version: '1.2.0' }), CATALOG_REVISION, INSTALLED_AT);
+    assert.deepStrictEqual(afterSecond.previousVersions.map(pin => pin.version), ['1.1.0', '1.0.0', '0.1.0']);
+    assert.strictEqual(afterSecond.version, '1.2.0');
+
+    const restored = recordAfterRollback(afterSecond, '1.0.0', '2026-10-08T02:00:00.000Z');
+    assert.ok(restored, 'a pin further down the history matches');
+    assert.strictEqual(restored.version, '1.0.0');
+    assert.deepStrictEqual(
+        restored.previousVersions.map(pin => pin.version),
+        ['0.1.0'],
+        'the discarded intermediate copies stay out of the history',
+    );
+});
+
+test('recordAfterRollback returns the record unchanged when the disk already agrees', () => {
+    const onDisk = recordWithHistory('1.0.0', 1);
+    assert.strictEqual(recordAfterRollback(onDisk, '1.0.0', INSTALLED_AT), onDisk);
+});
+
+test('recordAfterRollback drops the record when the restored version cannot be recovered', () => {
+    // A record with no history (e.g. first install recorded without a confirmed
+    // activation) has no pin to restore from.
+    const first = record({ version: '1.0.0' });
+    assert.ok(!('previousVersions' in first));
+    assert.strictEqual(recordAfterRollback(first, '0.9.0', INSTALLED_AT), null);
+
+    // History exists but nothing in it matches what landed on disk.
+    const mismatched = recordWithHistory('1.2.0', 2);
+    assert.strictEqual(recordAfterRollback(mismatched, '9.9.9', INSTALLED_AT), null);
+});
+
+test('recordAfterRollback re-pins through multiple rollback cycles', () => {
+    // 1.0.0 → 1.1.0 (unconfirmed, backup kept) → restore to 1.0.0
+    const afterFirstInstall = nextRecordAfterInstall(
+        recordWithHistory('1.0.0', 1),
+        catalogEntry({ version: '1.1.0' }),
+        CATALOG_REVISION,
+        INSTALLED_AT,
+    );
+    const rolledBack = recordAfterRollback(afterFirstInstall, '1.0.0', '2026-10-08T01:00:00.000Z');
+    assert.ok(rolledBack, 'a pin exists to restore from');
+    assert.strictEqual(rolledBack.version, '1.0.0');
+    assert.deepStrictEqual(rolledBack.previousVersions.map(pin => pin.version), ['0.1.0']);
+
+    // 1.0.0 (restored) → 1.2.0 (unconfirmed) → restore to 1.0.0 again. The
+    // failed 1.1.0 from the earlier cycle is gone from the history, so it can
+    // never be re-offered.
+    const afterSecondInstall = nextRecordAfterInstall(rolledBack, catalogEntry({ version: '1.2.0' }), CATALOG_REVISION, INSTALLED_AT);
+    assert.deepStrictEqual(afterSecondInstall.previousVersions.map(pin => pin.version), ['1.0.0', '0.1.0']);
+    const rolledBackAgain = recordAfterRollback(afterSecondInstall, '1.0.0', '2026-10-08T02:00:00.000Z');
+    assert.ok(rolledBackAgain, 'a pin exists to restore from');
+    assert.strictEqual(rolledBackAgain.version, '1.0.0');
+    assert.deepStrictEqual(rolledBackAgain.previousVersions.map(pin => pin.version), ['0.1.0']);
+});
+
 // ── User data ───────────────────────────────────────────────────────────────
 
 test('a confirmed data delete is addressed inside the config dir only', () => {
@@ -415,12 +510,14 @@ test('a copy parked on disk is disabled whatever the record claims', () => {
     assert.strictEqual(parked.disabled, true);
     assert.strictEqual(parked.updateStatus, 'disabled');
     assert.strictEqual(parked.updateAvailable, false, 'a disabled copy is never offered an update');
+    assert.strictEqual(parked.recoveryInstructions, '', 'a disabled copy has no activation to recover');
 
     // No record but a directory on disk: still installed, still shown as disabled.
     const unrecorded = lifecycleView({ entry, record: null, disabled: true, canRollback: false });
     assert.strictEqual(unrecorded.installed, true);
     assert.strictEqual(unrecorded.installedVersion, null);
     assert.strictEqual(unrecorded.updateStatus, 'disabled');
+    assert.strictEqual(unrecorded.recoveryInstructions, '', 'a disabled copy has no activation to recover');
 
     const available = lifecycleView({ entry, record: record({ version: '1.0.0' }), disabled: false, canRollback: true });
     assert.deepStrictEqual(
@@ -435,6 +532,8 @@ test('a copy parked on disk is disabled whatever the record claims', () => {
             downgradeVersions: 0,
             disabled: false,
             canRollback: true,
+            // A live copy with a backup gets "Restore previous" instructions.
+            recoveryInstructions: 'Use "Restore previous" to roll back Metronome to the version installed before this one if this version does not work.',
         },
     );
 
@@ -451,6 +550,8 @@ test('a copy parked on disk is disabled whatever the record claims', () => {
             downgradeVersions: [],
             disabled: false,
             canRollback: false,
+            // An uninstalled copy has nothing on disk to recover.
+            recoveryInstructions: '',
         },
     );
 });
@@ -464,6 +565,87 @@ test('the view carries the downgrade versions the screen may offer', () => {
     });
     assert.deepStrictEqual(view.downgradeVersions, ['0.2.0', '0.1.0']);
     assert.strictEqual(view.updateStatus, 'current');
+    // A backup is available, so the restore instruction is offered even though
+    // downgrade history exists too — the backup is the shorter way back.
+    assert.match(view.recoveryInstructions, /Restore previous/);
+    assert.ok(!view.recoveryInstructions.includes('Downgrade'));
+});
+
+// ── Recovery instructions (issue #23, lifecycle 4/6) ──
+
+test('recovery instructions point at rollback when a backup is kept', () => {
+    const view = lifecycleView({
+        entry: catalogEntry(),
+        record: record({ version: '1.0.0' }),
+        disabled: false,
+        canRollback: true,
+    });
+    assert.match(
+        view.recoveryInstructions,
+        /Use "Restore previous" to roll back/,
+        'a live copy with a backup is told to restore the previous version',
+    );
+});
+
+test('recovery instructions fall back to downgrade when the backup was committed away', () => {
+    const view = lifecycleView({
+        entry: catalogEntry(),
+        record: recordWithHistory('1.2.0', 2),
+        disabled: false,
+        canRollback: false,
+    });
+    assert.match(
+        view.recoveryInstructions,
+        /Use "Downgrade" to return/,
+        'no backup, but history — the Downgrade buttons are the way back',
+    );
+    assert.ok(!view.recoveryInstructions.includes('Restore previous'), 'downgrade instructions do not mention restore');
+});
+
+test('recovery instructions are empty once every recovery path is gone', () => {
+    // No backup, no history, but installed: nothing can restore an earlier version.
+    const view = lifecycleView({
+        entry: catalogEntry(),
+        record: record({ version: '1.0.0' }),
+        disabled: false,
+        canRollback: false,
+    });
+    assert.strictEqual(view.recoveryInstructions, '', 'installed with nothing to roll back to or downgrade from');
+});
+
+test('recovery instructions stay silent when history holds no earlier version', () => {
+    // Rollbacks no longer keep the just-failed version, but a plain downgrade
+    // history can still hold only newer pins. The advice must not call those
+    // "earlier" — and an empty note beats a wrong one.
+    const view = lifecycleView({
+        entry: catalogEntry({ version: '1.0.0' }),
+        record: {
+            ...record({ version: '1.0.0' }),
+            previousVersions: [recordedPin({ version: '1.2.0' })],
+        },
+        disabled: false,
+        canRollback: false,
+    });
+    assert.strictEqual(view.recoveryInstructions, '', 'only a newer pin means no earlier version to return to');
+});
+
+test('recovery instructions are not offered for disabled or uninstalled copies', () => {
+    const entry = catalogEntry();
+    const disabled = lifecycleView({
+        entry,
+        record: record({ version: '1.0.0' }),
+        disabled: true,
+        canRollback: true,
+    });
+    assert.strictEqual(disabled.recoveryInstructions, '', 'a disabled copy is already parked');
+
+    const uninstalled = lifecycleView({
+        entry,
+        record: null,
+        disabled: false,
+        canRollback: false,
+    });
+    assert.strictEqual(uninstalled.recoveryInstructions, '', 'no copy to recover');
 });
 
 // ── IPC arguments ───────────────────────────────────────────────────────────

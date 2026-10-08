@@ -56,14 +56,16 @@ renderer reaches it through `window.feedBackDesktop.plugins`:
   `installedVersion` (the version of any user-installed copy, `null` when only
   the packaged copy exists), `bundled` (the packaged copy is a bundled
   baseline), `activeSource` (which copy the backend loads — `bundled`,
-  `writable-override`, `installed`, or `none`), `canRollback`, `compat`
+  `writable-override`, `installed`, or `none`), `canRollback`, `recoveryInstructions`
+  (a human-readable recovery note the row renders when a rollback or downgrade
+  path is available — see lifecycle 4/6 below), `compat`
   (the entry's declared `compatibility` bounds judged against this build by
   `src/main/plugin-compat.ts`: `{ ok, requirements, reason }`, where
   `requirements` is the display phrase for the bounds ("fee[dB]ack core 0.3.0
   or newer, plugin API 1 or newer") and a per-entry `compat.ok: false` with its
   `reason` says why the entry does not fit this build), and the lifecycle view
   of `src/main/plugin-lifecycle.ts` (`installed`, `enabled`, `pinned`,
-  `updateStatus`, `updateAvailable`, `downgradeVersions`, `disabled`) that the
+  `updateStatus`, `updateAvailable`, `downgradeVersions`, `disabled`, `recoveryInstructions`) that the
   per-plugin controls render from. The top-level `ok: false` means the bundled
   catalog file is missing or unreadable, which the catalog view shows as an
   error rather than as an empty catalog.
@@ -318,6 +320,42 @@ Notes that matter when changing any of this:
 - **Restarting the backend is part of the operation, not an afterthought.**
   Enable, disable, update and downgrade each restart the Python backend and wait
   for it, so the next operation sees the state the last one left.
+
+## Rolling back a bad update (4/6)
+
+When an update or downgrade fails to activate, the previous version is restored
+from the backup slot and the backend restarted so the restored copy loads again.
+This happens automatically during the install flow, and the user can trigger it
+manually too: the catalog row shows a "Restore previous" button whenever
+`canRollback` is true (a backup is kept and the plugin is not disabled).
+
+The row also carries a `recoveryInstructions` string whenever a recovery path is
+available. When a backup is present it tells the user to restore the previous
+version; when the backup has already been committed away but the record still
+holds earlier versions it tells the user to downgrade instead. Neither is shown
+for a disabled or uninstalled copy — neither has a live activation to recover.
+
+- **After a failed activation the backup is restored, then the backend restarts.**
+  `installOverInstalled` and `rollbackCatalogPlugin` both restart the Python
+  backend after restoring, so the recovered version is live without the user
+  having to ask twice. A restart that cannot happen is reported in the message.
+- **Recovery instructions are derived, not stored.** They are computed in
+  `lifecycleView` (see `src/main/plugin-lifecycle.ts`) from `canRollback` and
+  the genuinely earlier pins in `downgradeVersions`, so the advice the screen
+  gives always matches the button the screen actually offers. The downgrade
+  note stays silent when the history holds only newer versions — restored
+  copies never keep the just-failed version, so it is never presented as the
+  way back.
+- **The record is rewritten to the copy actually on disk.**
+  `rollbackCatalogPlugin` reads the restored version from the restored manifest
+  (`installedVersionOnDisk`) and calls `recordAfterRollback`, so the
+  installed-state record describes the copy that is now on disk even when a
+  second install over an unconfirmed copy kept the OLD backup: the history pin
+  matching the restored version becomes the record, and only older pins are
+  kept. When nothing in the history matches, the record is dropped rather than
+  left claiming a version that is not on disk. A record-write failure is
+  logged and reported, but never turns the already-successful restore into a
+  failure or skips the backend restart.
 
 ## First-run guided selection
 

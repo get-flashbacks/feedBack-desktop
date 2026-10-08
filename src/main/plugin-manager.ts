@@ -39,6 +39,7 @@ import {
     hasBackup,
     installCatalogBatch,
     installCatalogEntry,
+    installedVersionOnDisk,
     isPluginDisabled,
     loadCatalog,
     removePluginSource,
@@ -77,6 +78,7 @@ import {
     nextRecordAfterInstall,
     pluginIdFrom,
     recordAfterPinChange,
+    recordAfterRollback,
     resolveUpdate,
     splitLifecycleRequests,
     updateCandidates,
@@ -814,8 +816,68 @@ async function rollbackCatalogPlugin(id: unknown): Promise<{ success: boolean; m
     }
     catalogBusy = true;
     try {
-        await rollbackInstall(getPluginsDir(), entry.installDir);
-        return { success: true, message: `Restored the previous version of ${entry.name}. Restart to activate.` };
+        const result = await rollbackInstall(getPluginsDir(), entry.installDir);
+        // The record must describe the copy that is now on disk. The restored
+        // version is read from the restored manifest: a second install over an
+        // unconfirmed copy keeps the OLD backup, so `previousVersions[0]`
+        // alone can name a version the restore discarded. When no history pin
+        // matches, or nothing was restored, the record is dropped rather than
+        // left claiming a version that is not on disk.
+        if (result === 'restored') {
+            const onDiskVersion = installedVersionOnDisk(getPluginsDir(), entry.installDir);
+            const record = recordedFor(entry.id);
+            if (onDiskVersion !== null && record) {
+                const restored = recordAfterRollback(record, onDiskVersion, new Date().toISOString());
+                try {
+                    if (restored) {
+                        const next = restored;
+                        await updateInstalledState(installedStateDir(), (records) => {
+                            records.set(entry.id, next);
+                        }, next.installedAt);
+                    } else {
+                        await updateInstalledState(installedStateDir(), (records) => {
+                            records.delete(entry.id);
+                        }, new Date().toISOString());
+                    }
+                } catch (e) {
+                    // The files are already back; a state write that will not
+                    // land must not turn the successful restore into a failure
+                    // or skip the backend restart. Report it the same way the
+                    // other record writes do and keep going.
+                    console.error('[plugins] could not record the rollback', e);
+                }
+            } else if (record) {
+                // Restored but the manifest could not be read, so the version on
+                // disk cannot be matched to a history pin. Drop the stale record
+                // rather than leave it claiming a version that cannot be verified.
+                try {
+                    await updateInstalledState(installedStateDir(), (records) => {
+                        records.delete(entry.id);
+                    }, new Date().toISOString());
+                } catch (e) {
+                    console.error('[plugins] could not record the rollback', e);
+                }
+            }
+        } else {
+            try {
+                await updateInstalledState(installedStateDir(), (records) => {
+                    records.delete(entry.id);
+                }, new Date().toISOString());
+            } catch (e) {
+                console.error('[plugins] could not record the rollback', e);
+            }
+        }
+        // The restored version is back on disk, but the backend is still running
+        // the broken copy that was there before the restore — so restart it the
+        // same way the per-plugin update/downgrade paths do, and only fall back to
+        // a "restart yourself" message when that restart cannot happen.
+        try {
+            await restartPythonAndWait();
+            return { success: true, message: `Restored the previous version of ${entry.name}.` };
+        } catch (e) {
+            console.error('[plugins] restart after rollback failed', e);
+            return { success: true, message: `Restored the previous version of ${entry.name}. Restart the app to activate it.` };
+        }
     } catch (e) {
         return { success: false, message: e instanceof InstallError ? e.message : 'Rollback failed.' };
     } finally {
@@ -896,12 +958,25 @@ async function installOverInstalled(
             };
         }
         let restored = 'It was removed.';
+        let wasRestored = false;
         try {
             if (await rollbackInstall(pluginsDir, entry.installDir) === 'restored') {
                 restored = 'The previous version was restored.';
+                wasRestored = true;
             }
         } catch (e) {
             restored = e instanceof InstallError ? e.message : 'The previous version could not be restored.';
+        }
+        // The backend is still running the broken copy: restart so the restored
+        // version loads, mirroring the rollbackCatalog path. A restart that cannot
+        // happen is reported — the files are already back, the app just needs a nudge.
+        try {
+            await restartPythonAndWait();
+        } catch (e) {
+            console.error('[plugins] restart after auto-rollback failed', e);
+            if (wasRestored) {
+                restored += ' Restart the app to activate the restored version.';
+            }
         }
         return {
             success: false,

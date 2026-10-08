@@ -94,6 +94,7 @@ function entry(overrides) {
         bundled: false,
         activeSource: 'none',
         canRollback: false,
+        recoveryInstructions: '',
         // The verdict listCatalog() derives from the declaration above against
         // this build — the shape src/main/plugin-compat.ts produces.
         compat: compatibilityFor(
@@ -881,7 +882,7 @@ test('transitive dependencies are adopted in the same resolve, not one per round
 test('a re-render resolves the selection once, not once per row', async () => {
     const { document, resolveCalls } = await runScreen(
         [
-            entry({ id: 'alpha', name: 'Practice Alpha', canRollback: true }),
+            entry({ id: 'alpha', name: 'Practice Alpha', canRollback: true, recoveryInstructions: 'Use "Restore previous" to roll back Practice Alpha.' }),
             entry({ id: 'beta', name: 'Practice Beta' }),
             entry({ id: 'gamma', name: 'Tools Gamma' }),
         ],
@@ -904,6 +905,68 @@ test('a re-render resolves the selection once, not once per row', async () => {
     await flush();
 
     assert.equal(resolveCalls.length, 2, `one resolve for the whole rebuild, got ${resolveCalls.length}`);
+});
+
+test('recovery instructions are shown on the row when a rollback or downgrade path exists', async () => {
+    const { document } = await runScreen([
+        entry({
+            id: 'alpha',
+            name: 'Practice Alpha',
+            installedVersion: '1.0.0',
+            activeSource: 'installed',
+            canRollback: true,
+            recoveryInstructions: 'Use "Restore previous" to roll back Practice Alpha.',
+        }),
+        entry({
+            id: 'beta',
+            name: 'Practice Beta',
+            installedVersion: '2.0.0',
+            activeSource: 'installed',
+            canRollback: false,
+            recoveryInstructions: 'Use "Downgrade" to return Practice Beta to an earlier version.',
+        }),
+        entry({
+            id: 'gamma',
+            name: 'Tools Gamma',
+            installedVersion: '1.0.0',
+            activeSource: 'installed',
+            canRollback: false,
+            recoveryInstructions: '',
+        }),
+    ]);
+    // The install list rows carry lifecycle controls and recovery instructions.
+    // Each row is: [checkbox, meta, ...controls, restore?]. meta is the second
+    // child and its innerHTML is the template literal the screen sets.
+    const list = document.getElementById('pm-catalog');
+    const alphaMeta = list.children[0].children[1];
+    const betaMeta = list.children[1].children[1];
+    const gammaMeta = list.children[2].children[1];
+    // The two rows with instructions surface them (escaped); the empty one does not.
+    assert.match(
+        alphaMeta.innerHTML,
+        /Use &quot;Restore previous&quot; to roll back Practice Alpha/,
+        'restore instructions are escaped and visible',
+    );
+    assert.match(
+        betaMeta.innerHTML,
+        /Use &quot;Downgrade&quot; to return Practice Beta to an earlier version/,
+        'downgrade instructions are escaped and visible',
+    );
+    assert.equal(gammaMeta.innerHTML.indexOf('text-amber-200'), -1, 'no recovery element for an uninstalled/empty row');
+});
+
+test('recovery instructions are absent for uninstalled or disabled copies', async () => {
+    const { document } = await runScreen([
+        entry({
+            id: 'gamma',
+            name: 'Tools Gamma',
+            recoveryInstructions: '',
+        }),
+    ]);
+    const list = document.getElementById('pm-catalog');
+    const gammaMeta = list.children[0].children[1];
+    // No recovery-instruction line is emitted when the field is empty.
+    assert.equal(gammaMeta.innerHTML.indexOf('text-amber-200'), -1, 'no recovery-instruction element at all');
 });
 
 // ── The install action (issue #18, catalog UI 4/5) ───────────────────────
